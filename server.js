@@ -17,40 +17,84 @@ const question = (text) => new Promise((resolve) => rl.question(text, resolve));
 
 async function startBot() {
     const { state, saveCreds } = await useMultiFileAuthState('auth_info');
-    const sock = makeWASocket({ auth: state, logger: pino({ level: 'silent' }) });
+    
+    // Pino logger ko silent rakha hai taaki sirf kaam ke logs dikhein
+    const sock = makeWASocket({ 
+        auth: state, 
+        logger: pino({ level: 'silent' }),
+        printQRInTerminal: false 
+    });
     
     sock.ev.on('creds.update', saveCreds);
 
+    // Pairing Code logic (Bina QR scan ke connect karne ke liye)
     if (!sock.authState.creds.registered) {
-        const phoneNumber = await question('Enter WhatsApp Number (91...): ');
+        console.log("\n⚠️ Bot not connected. Requesting Pairing Code...");
+        const phoneNumber = await question('👉 Enter your WhatsApp Number (91XXXXXXXXXX): ');
         const code = await sock.requestPairingCode(phoneNumber);
         console.log(`\n🔥 YOUR PAIRING CODE: ${code}\n`);
+        console.log("Steps: Open WhatsApp -> Linked Devices -> Link a Device -> Link with phone number instead -> Enter this code.");
     }
 
     sock.ev.on('connection.update', (update) => {
         const { connection, lastDisconnect } = update;
         if (connection === 'close') {
             const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
+            console.log('🔄 Connection closed. Reconnecting...', shouldReconnect);
             if (shouldReconnect) startBot();
         } else if (connection === 'open') {
-            console.log('✅ WhatsApp Bot Connected!');
+            console.log('\n✅ WhatsApp Bot Connected & Ready!\n');
         }
     });
 
+    // --- OTP SENDING ENDPOINT ---
     app.post('/send-otp', async (req, res) => {
-        const { phoneNumber, otp } = req.body;
+        let { phoneNumber, otp } = req.body;
+        console.log(`📩 Incoming OTP Request for: ${phoneNumber}`);
+        
         try {
-            await sock.sendMessage(`91${phoneNumber}@s.whatsapp.net`, { text: `Tinklet OTP: ${otp}` });
+            // JUGAD: Number ko clean karna (Sirf digits rakho)
+            let cleanNumber = phoneNumber.replace(/\D/g, ''); 
+            
+            // Agar 10 digit hai toh 91 jodo, agar already 12 digit (91...) hai toh rehne do
+            if (cleanNumber.length === 10) {
+                cleanNumber = '91' + cleanNumber;
+            }
+
+            const jid = `${cleanNumber}@s.whatsapp.net`;
+            
+            await sock.sendMessage(jid, { 
+                text: `*Tinklet - Bharat Dating App*\n\nYour OTP is: *${otp}*\n\nDo not share this with anyone for security.` 
+            });
+
+            console.log(`✅ OTP sent successfully to: ${jid}`);
             res.sendStatus(200);
-        } catch (e) { res.status(500).send(e.message); }
+        } catch (e) {
+            console.error(`❌ Error sending OTP: ${e.message}`);
+            res.status(500).send(e.message);
+        }
     });
 }
 
+// --- CHAT & WEBRTC SIGNALLING ---
 io.on('connection', (socket) => {
-    socket.on('join', (userId) => socket.join(userId));
-    socket.on('chat_message', (data) => io.to(data.receiverId).emit('chat_message', data));
-    socket.on('call_signal', (data) => io.to(data.receiverId).emit('call_signal', data));
+    socket.on('join', (userId) => {
+        socket.join(userId);
+        console.log(`👤 User joined room: ${userId}`);
+    });
+    
+    socket.on('chat_message', (data) => {
+        io.to(data.receiverId).emit('chat_message', data);
+    });
+
+    socket.on('call_signal', (data) => {
+        io.to(data.receiverId).emit('call_signal', data);
+    });
 });
 
 startBot();
-server.listen(4000, () => console.log('🚀 Tinklet Server on Port 4000'));
+
+// Port 4000 par chala rahe hain (Port 3000 par purani app safe rahegi)
+server.listen(4000, () => {
+    console.log('🚀 Tinklet Server running on Port 4000');
+});
