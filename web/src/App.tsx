@@ -16,7 +16,7 @@ type User = {
 
 type AuthResponse = { token: string; user: User }
 
-const API_BASE = (import.meta.env.VITE_API_BASE_URL || 'https://assembled-warriors-traveler-smaller.trycloudflare.com').replace(/\/$/, '')
+const API_BASE = (import.meta.env.VITE_API_BASE_URL || 'https://nameless-thunder-8f79tinklet-api.sm231219933.workers.dev').replace(/\/$/, '')
 
 async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
   const token = localStorage.getItem('tinklet_token')
