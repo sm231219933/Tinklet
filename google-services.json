@@ -1,0 +1,47 @@
+{
+  "project_info": {
+    "project_number": "145266939731",
+    "project_id": "tinklet",
+    "storage_bucket": "tinklet.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:145266939731:android:2190549842df0d987573a6",
+        "android_client_info": {
+          "package_name": "com.tinklet.bharatdatingapp"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "145266939731-naj0irsg6goi6pgv2h6hi2096066o201.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.tinklet.bharatdatingapp",
+            "certificate_hash": "9f2c501efdb3674155c3ae5a055bbdba592c5144"
+          }
+        },
+        {
+          "client_id": "145266939731-m78drp48kjbslsvc4tmgphvb8lgnspfd.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDz-CTQ_OozAYw71Qf9OTvFONKC4nvtwVY"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "145266939731-m78drp48kjbslsvc4tmgphvb8lgnspfd.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
