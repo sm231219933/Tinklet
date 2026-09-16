@@ -1,4 +1,4 @@
-cat << 'EOF' > ~/Tinklet/server.js
+
 require('dotenv').config({ path: __dirname + '/.env' });
 const express = require('express');
 const http = require('http');
@@ -261,4 +261,4 @@ async function startBot() {
 // ==========================================
 startBot();
 masterServer.listen(4000, () => console.log('🚀 ULTIMATE SUBDIVIDED SERVER READY ON PORT 4000'));
-EOF
+
