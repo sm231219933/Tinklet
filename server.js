@@ -88,7 +88,12 @@ app.get('/api/sync/all', authenticateToken, async (req, res) => {
         const sent = await ddb.send(new QueryCommand({ TableName: TABLES.LIKES, KeyConditionExpression: "fromUserId = :me", ExpressionAttributeValues: { ":me": email } }));
         const incoming = await ddb.send(new QueryCommand({ TableName: TABLES.LIKES, IndexName: "toUserId-index", KeyConditionExpression: "toUserId = :me", ExpressionAttributeValues: { ":me": email } }));
         const matches = await ddb.send(new ScanCommand({ TableName: TABLES.MATCHES, FilterExpression: "contains(#u, :me)", ExpressionAttributeNames: { "#u": "users" }, ExpressionAttributeValues: { ":me": email } }));
-        res.json({ user: profileMap[email], sent: (sent.Items || []).map(l => ({ ...profileMap[l.toUserId.toLowerCase()], connectionStatus: l.action })).filter(p => p.email), incoming: (incoming.Items || []).map(l => ({ ...profileMap[l.fromUserId.toLowerCase()], connectionStatus: "PENDING" })).filter(p => p.email), matches: (matches.Items || []).map(m => ({ ...profileMap[m.users.find(u => u.toLowerCase() !== email).toLowerCase()], connectionStatus: "ACCEPTED" })).filter(p => p.email) });
+        res.json({
+    user: profileMap[email],
+    sent: (sent.Items || []).map(l => ({ fromUserId: l.fromUserId, toUserId: l.toUserId, action: l.action, timestamp: l.timestamp || 0 })),
+    incoming: (incoming.Items || []).map(l => ({ fromUserId: l.fromUserId, toUserId: l.toUserId, action: l.action, timestamp: l.timestamp || 0 })),
+    matches: (matches.Items || [])
+});
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
