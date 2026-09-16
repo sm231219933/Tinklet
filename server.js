@@ -1,4 +1,3 @@
-
 require('dotenv').config({ path: __dirname + '/.env' });
 const express = require('express');
 const http = require('http');
@@ -15,9 +14,6 @@ const qs = require('qs');
 const { default: makeWASocket, useMultiFileAuthState } = require("@whiskeysockets/baileys");
 const pino = require('pino');
 
-// ==========================================
-// BLOCK 0: CORE SETUP & CONFIG
-// ==========================================
 const app = express();
 app.use(cors());
 app.use(bodyParser.json({ limit: '50mb' }));
@@ -29,9 +25,6 @@ const JWT_SECRET = process.env.JWT_SECRET || 'tinklet_secret_2026';
 const IMGBB_KEY = process.env.IMGBB_KEY;
 const TABLES = { USERS: "Profiles", LIKES: "Likes", MATCHES: "Matches", REPORTS: "Reports", DELETION: "DeletionRequests" };
 
-// ==========================================
-// BLOCK 1: SECURITY & HELPERS
-// ==========================================
 function authenticateToken(req, res, next) {
     const authHeader = req.headers['authorization'];
     const token = authHeader && authHeader.split(' ')[1];
@@ -44,11 +37,6 @@ function authenticateToken(req, res, next) {
 }
 function createMatchId(u1, u2) { return crypto.createHash("sha256").update([u1.toLowerCase(), u2.toLowerCase()].sort().join(":")).digest("hex").substring(0, 32); }
 
-// ==========================================
-// BLOCK 2: AUTHENTICATION SUBDIVISIONS
-// ==========================================
-
-// 2A: SIGNUP API (Full Mirroring)
 app.post('/api/auth/signup', async (req, res) => {
     try {
         const email = req.body.email.trim().toLowerCase();
@@ -58,7 +46,6 @@ app.post('/api/auth/signup', async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// 2B: LOGIN API (Auto-Recovery)
 app.post('/api/auth/login', async (req, res) => {
     try {
         const email = req.body.email.trim().toLowerCase();
@@ -68,17 +55,20 @@ app.post('/api/auth/login', async (req, res) => {
             await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email }, UpdateExpression: "SET isDeactivated = :f REMOVE deletionRequestedAt", ExpressionAttributeValues: { ":f": false } }));
             try { await ddb.send(new DeleteCommand({ TableName: TABLES.DELETION, Key: { email } })); } catch(err) {}
         }
+        // Old accounts created before the coin system get the normal signup balance once.
+        if (result.Item.coins === undefined || result.Item.coins === null) {
+            await ddb.send(new UpdateCommand({
+                TableName: TABLES.USERS,
+                Key: { email },
+                UpdateExpression: "SET coins = :coins",
+                ExpressionAttributeValues: { ":coins": 25 }
+            }));
+            result.Item.coins = 25;
+        }
         res.json({ token: jwt.sign({ email: result.Item.email }, JWT_SECRET), user: result.Item });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ==========================================
-// BLOCK 3: DISCOVERY & SYNC SUBDIVISIONS
-// ==========================================
-
-
-
-// 3B: SYNC ALL API (Full Inbox Sync)
 app.get('/api/sync/all', authenticateToken, async (req, res) => {
     try {
         const email = req.user.email;
@@ -91,85 +81,62 @@ app.get('/api/sync/all', authenticateToken, async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ==========================================
-// BLOCK 4: ACTION SUBDIVISIONS
-// ==========================================
-
-// 4A: DISCOVERY FEED API (STABLE)
 app.get('/api/swipe/feed', authenticateToken, async (req, res) => {
     try {
         const myEmail = req.user.email;
-
         const [allUsers, meRes] = await Promise.all([
-            ddb.send(new ScanCommand({
-                TableName: TABLES.USERS
-            })),
-            ddb.send(new GetCommand({
-                TableName: TABLES.USERS,
-                Key: { email: myEmail }
-            }))
+            ddb.send(new ScanCommand({ TableName: TABLES.USERS })),
+            ddb.send(new GetCommand({ TableName: TABLES.USERS, Key: { email: myEmail } }))
         ]);
-
         const me = meRes.Item || {};
         const myInteractions = me.interactions || {};
-
-        const swiped = Object.keys(myInteractions)
-            .map(e => e.toLowerCase().trim());
-
-        const feed = (allUsers.Items || [])
-            .filter(u => {
-                if (!u.email) return false;
-
-                const target = u.email.toLowerCase().trim();
-
-                return (
-                    target !== myEmail &&
-                    !swiped.includes(target) &&
-                    u.isDeactivated !== true
-                );
-            })
-            .map(u => ({
-                ...u,
-                photoUri: u.photoUri || u.photoUrl || ""
-            }));
-
+        const swiped = Object.keys(myInteractions).map(e => e.toLowerCase().trim());
+        const feed = (allUsers.Items || []).filter(u => {
+            if (!u.email) return false;
+            const target = u.email.toLowerCase().trim();
+            return target !== myEmail && !swiped.includes(target) && u.isDeactivated !== true;
+        }).map(u => ({ ...u, photoUri: u.photoUri || u.photoUrl || "" }));
         res.json({ feed });
-
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
+    } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ==========================================
-// BLOCK 4B: SWIPE ACTIONS (ROBUST COINS)
-// ==========================================
 app.post('/api/swipe/action', authenticateToken, async (req, res, next) => {
     const action = (req.body.action || "").toUpperCase();
-    if (action === 'ACCEPT') return next(); 
+    if (action === 'ACCEPT') return next();
     try {
         const fromEmail = req.user.email;
         const toUserId = (req.body.toUserId || "").trim().toLowerCase();
         const cost = action === 'SUPERLIKE' ? 10 : (['REJECTED', 'LIKE'].includes(action) ? 1 : 0);
 
-        // 1. DEDUCT COINS (Atomic)
+        // If an older account has no coins field, initialize it to the normal 25-coin balance.
+        // A real zero balance is NOT reset; it correctly remains insufficient.
+        if (cost > 0) {
+            await ddb.send(new UpdateCommand({
+                TableName: TABLES.USERS,
+                Key: { email: fromEmail },
+                UpdateExpression: "SET coins = if_not_exists(coins, :start)",
+                ExpressionAttributeValues: { ":start": 25 }
+            }));
+        }
+
         const coinUpdate = await ddb.send(new UpdateCommand({
-            TableName: TABLES.USERS, Key: { email: fromEmail },
-            UpdateExpression: "SET coins = if_not_exists(coins, :start) - :cost",
-            ConditionExpression: "if_not_exists(coins, :start) >= :cost",
-            ExpressionAttributeValues: { ":cost": cost, ":start": 25 },
+            TableName: TABLES.USERS,
+            Key: { email: fromEmail },
+            UpdateExpression: "SET coins = coins - :cost",
+            ConditionExpression: "coins >= :cost",
+            ExpressionAttributeValues: { ":cost": cost },
             ReturnValues: "ALL_NEW"
         }));
 
-        // 2. UPDATE INTERACTIONS (Separate for safety)
         const updateExpr = action !== 'CANCEL' ? "SET interactions = if_not_exists(interactions, :empty), interactions.#target = :act" : "REMOVE interactions.#target";
         await ddb.send(new UpdateCommand({
-            TableName: TABLES.USERS, Key: { email: fromEmail },
+            TableName: TABLES.USERS,
+            Key: { email: fromEmail },
             UpdateExpression: updateExpr,
             ExpressionAttributeNames: { "#target": toUserId },
             ExpressionAttributeValues: action !== 'CANCEL' ? { ":empty": {}, ":act": action } : undefined
         }));
 
-        // 3. LOG TO LIKES TABLE
         if (action !== 'CANCEL') await ddb.send(new PutCommand({ TableName: TABLES.LIKES, Item: { fromUserId: fromEmail, toUserId, action, timestamp: Date.now() } }));
         else await ddb.send(new DeleteCommand({ TableName: TABLES.LIKES, Key: { fromUserId: fromEmail, toUserId } }));
 
@@ -181,19 +148,12 @@ app.post('/api/swipe/action', authenticateToken, async (req, res, next) => {
     }
 });
 
-// ==========================================
-// BLOCK 5: ECONOMY SUBDIVISIONS
-// ==========================================
-
-// 5A: AD REWARD API (+5)
 app.post('/api/coins/reward', authenticateToken, async (req, res) => {
     try {
         const update = await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email: req.user.email }, UpdateExpression: "SET coins = if_not_exists(coins, :start) + :r", ExpressionAttributeValues: { ":r": 5, ":start": 25 }, ReturnValues: "ALL_NEW" }));
         res.json({ success: true, coins: update.Attributes.coins });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
-
-// 5B: REFERRAL API (+50)
 app.post('/api/referral/credit', authenticateToken, async (req, res) => {
     try {
         const { code } = req.body;
@@ -203,8 +163,6 @@ app.post('/api/referral/credit', authenticateToken, async (req, res) => {
         else { res.status(404).json({ error: "Invalid code" }); }
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
-
-// 5C: LEADERBOARD API (RICH LIST)
 app.get('/api/swipe/leaderboard', async (req, res) => {
     try {
         const result = await ddb.send(new ScanCommand({ TableName: TABLES.USERS }));
@@ -212,10 +170,6 @@ app.get('/api/swipe/leaderboard', async (req, res) => {
         res.json({ leaderboard: list });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
-
-// ==========================================
-// BLOCK 6: ACCOUNT SAFETY SUBDIVISIONS
-// ==========================================
 app.post('/api/account/deactivate', authenticateToken, async (req, res) => {
     try { await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email: req.user.email }, UpdateExpression: "SET isDeactivated = :v", ExpressionAttributeValues: { ":v": true } })); res.json({ success: true }); }
     catch (e) { res.status(500).json({ error: e.message }); }
@@ -228,10 +182,6 @@ app.post('/api/report', authenticateToken, async (req, res) => {
     try { await ddb.send(new PutCommand({ TableName: TABLES.REPORTS, Item: { reportId: uuidv4(), reporter: req.user.email, target: req.body.targetEmail, reason: req.body.reason, timestamp: Date.now() } })); res.json({ success: true }); }
     catch (e) { res.status(500).json({ error: e.message }); }
 });
-
-// ==========================================
-// BLOCK 7: MEDIA & PROFILE SUBDIVISIONS
-// ==========================================
 app.post('/profile/save', authenticateToken, async (req, res) => {
     try { await ddb.send(new PutCommand({ TableName: TABLES.USERS, Item: req.body })); res.json({ success: true }); }
     catch (e) { res.status(500).json({ error: e.message }); }
@@ -243,10 +193,6 @@ app.post('/image/upload', async (req, res) => {
         res.json({ url: resp.data.data.url });
     } catch (e) { res.status(500).json({ error: "Upload fail" }); }
 });
-
-// ==========================================
-// BLOCK 8: WHATSAPP BOT (PRESERVED)
-// ==========================================
 async function startBot() {
     try {
         const { state, saveCreds } = await useMultiFileAuthState(__dirname + '/auth_info');
@@ -255,10 +201,5 @@ async function startBot() {
         sock.ev.on('connection.update', (u) => { if (u.connection === 'open') console.log('✅ Bot Alive!'); });
     } catch (e) { console.error("WA Bot Error:", e.message); }
 }
-
-// ==========================================
-// BLOCK 9: SYSTEM START
-// ==========================================
 startBot();
 masterServer.listen(4000, () => console.log('🚀 ULTIMATE SUBDIVIDED SERVER READY ON PORT 4000'));
-
