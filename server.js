@@ -104,27 +104,49 @@ app.get('/api/sync/all', authenticateToken, async (req, res) => {
 // BLOCK 4: ACTION SUBDIVISIONS
 // ==========================================
 
-// ==========================================
-// BLOCK 4A: DISCOVERY FEED API (STABLE)
-// ==========================================
+// 4A: DISCOVERY FEED API (STABLE)
 app.get('/api/swipe/feed', authenticateToken, async (req, res) => {
     try {
         const myEmail = req.user.email;
+
         const [allUsers, meRes] = await Promise.all([
-            ddb.send(new ScanCommand({ TableName: TABLES.USERS })),
-            ddb.send(new GetCommand({ TableName: TABLES.USERS, Key: { email: myEmail } }))
+            ddb.send(new ScanCommand({
+                TableName: TABLES.USERS
+            })),
+            ddb.send(new GetCommand({
+                TableName: TABLES.USERS,
+                Key: { email: myEmail }
+            }))
         ]);
+
         const me = meRes.Item || {};
         const myInteractions = me.interactions || {};
-        const swiped = Object.keys(myInteractions).map(e => e.toLowerCase().trim());
 
-        const feed = (allUsers.Items || []).filter(u => {
-            if (!u.email) return false;
-            const target = u.email.toLowerCase().trim();
-            return target !== myEmail && !swiped.includes(target) && u.isDeactivated !== true;
-        }).map(u => ({ ...u, photoUri: u.photoUri || u.photoUrl || "" }));
+        const swiped = Object.keys(myInteractions)
+            .map(e => e.toLowerCase().trim());
+
+        const feed = (allUsers.Items || [])
+            .filter(u => {
+                if (!u.email) return false;
+
+                const target = u.email.toLowerCase().trim();
+
+                return (
+                    target !== myEmail &&
+                    !swiped.includes(target) &&
+                    u.isDeactivated !== true
+                );
+            })
+            .map(u => ({
+                ...u,
+                photoUri: u.photoUri || u.photoUrl || ""
+            }));
+
         res.json({ feed });
-    } catch (e) { res.status(500).json({ error: e.message }); }
+
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
 });
 
 // ==========================================
