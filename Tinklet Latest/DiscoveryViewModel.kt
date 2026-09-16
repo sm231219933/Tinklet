@@ -107,26 +107,43 @@ class DiscoveryViewModel(private val app: Application) : AndroidViewModel(app) {
         }
     }
     // 1. DISCOVERY FLOW (BACKUP STYLE FILTERING)
-    val profiles: StateFlow<List<UserProfile>> = combine(
-        profileDao.getAllProfilesFlow(),
-        _remoteProfiles,
-        _currentUser
-    ) { local, remote, me ->
-        val meEmail = (me?.email ?: "").lowercase().trim()
-        
-        // Un logon ki list jo local DB mein swiped hain
-        val swipedEmails = local.filter { 
-            it.connectionStatus != "NONE" && it.connectionStatus != "VIEWED" 
-        }.map { it.email.lowercase().trim() }.toSet()
+   private val _remoteProfiles = MutableStateFlow<List<UserProfile>>(emptyList())
 
-        // Filter: Remote mein se khud ko aur swiped logon ko hatao
-        val combined = remote.filter { 
-            val email = it.email.lowercase().trim()
-            email != meEmail && !swipedEmails.contains(email) 
+val profiles: StateFlow<List<UserProfile>> = combine(
+    _remoteProfiles,
+    _currentUser
+) { remote, me ->
+
+    val myEmail = me?.email
+        ?.trim()
+        ?.lowercase()
+        ?: ""
+
+    remote
+        .filter {
+            it.email.trim().lowercase() != myEmail
         }
-        
-        combined.distinctBy { it.email }.sortedByDescending { it.lastActive }
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+        .distinctBy {
+            it.email.trim().lowercase()
+        }
+        .sortedWith(
+            compareByDescending<UserProfile> {
+                when (it.badgeType) {
+                    "GOLDEN" -> 3
+                    "SILVER" -> 2
+                    "BRONZE" -> 1
+                    else -> 0
+                }
+            }.thenByDescending {
+                it.lastActive
+            }
+        )
+
+}.stateIn(
+    viewModelScope,
+    SharingStarted.WhileSubscribed(5000),
+    emptyList()
+)
     // DEBUG VERSION: Showing remote profiles directly to find the bug
 
 
