@@ -55,14 +55,8 @@ app.post('/api/auth/login', async (req, res) => {
             await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email }, UpdateExpression: "SET isDeactivated = :f REMOVE deletionRequestedAt", ExpressionAttributeValues: { ":f": false } }));
             try { await ddb.send(new DeleteCommand({ TableName: TABLES.DELETION, Key: { email } })); } catch(err) {}
         }
-        // Old accounts created before the coin system get the normal signup balance once.
-        if (result.Item.coins === undefined || result.Item.coins === null) {
-            await ddb.send(new UpdateCommand({
-                TableName: TABLES.USERS,
-                Key: { email },
-                UpdateExpression: "SET coins = :coins",
-                ExpressionAttributeValues: { ":coins": 25 }
-            }));
+        if (result.Item.coins === undefined || result.Item.coins === null || Number(result.Item.coins) < 0) {
+            await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email }, UpdateExpression: "SET coins = :coins", ExpressionAttributeValues: { ":coins": 25 } }));
             result.Item.coins = 25;
         }
         res.json({ token: jwt.sign({ email: result.Item.email }, JWT_SECRET), user: result.Item });
@@ -107,39 +101,14 @@ app.post('/api/swipe/action', authenticateToken, async (req, res, next) => {
         const fromEmail = req.user.email;
         const toUserId = (req.body.toUserId || "").trim().toLowerCase();
         const cost = action === 'SUPERLIKE' ? 10 : (['REJECTED', 'LIKE'].includes(action) ? 1 : 0);
-
-        // If an older account has no coins field, initialize it to the normal 25-coin balance.
-        // A real zero balance is NOT reset; it correctly remains insufficient.
         if (cost > 0) {
-            await ddb.send(new UpdateCommand({
-                TableName: TABLES.USERS,
-                Key: { email: fromEmail },
-                UpdateExpression: "SET coins = if_not_exists(coins, :start)",
-                ExpressionAttributeValues: { ":start": 25 }
-            }));
+            await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email: fromEmail }, UpdateExpression: "SET coins = if_not_exists(coins, :start)", ExpressionAttributeValues: { ":start": 25 } }));
         }
-
-        const coinUpdate = await ddb.send(new UpdateCommand({
-            TableName: TABLES.USERS,
-            Key: { email: fromEmail },
-            UpdateExpression: "SET coins = coins - :cost",
-            ConditionExpression: "coins >= :cost",
-            ExpressionAttributeValues: { ":cost": cost },
-            ReturnValues: "ALL_NEW"
-        }));
-
+        const coinUpdate = await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email: fromEmail }, UpdateExpression: "SET coins = coins - :cost", ConditionExpression: "coins >= :cost", ExpressionAttributeValues: { ":cost": cost }, ReturnValues: "ALL_NEW" }));
         const updateExpr = action !== 'CANCEL' ? "SET interactions = if_not_exists(interactions, :empty), interactions.#target = :act" : "REMOVE interactions.#target";
-        await ddb.send(new UpdateCommand({
-            TableName: TABLES.USERS,
-            Key: { email: fromEmail },
-            UpdateExpression: updateExpr,
-            ExpressionAttributeNames: { "#target": toUserId },
-            ExpressionAttributeValues: action !== 'CANCEL' ? { ":empty": {}, ":act": action } : undefined
-        }));
-
+        await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email: fromEmail }, UpdateExpression: updateExpr, ExpressionAttributeNames: { "#target": toUserId }, ExpressionAttributeValues: action !== 'CANCEL' ? { ":empty": {}, ":act": action } : undefined }));
         if (action !== 'CANCEL') await ddb.send(new PutCommand({ TableName: TABLES.LIKES, Item: { fromUserId: fromEmail, toUserId, action, timestamp: Date.now() } }));
         else await ddb.send(new DeleteCommand({ TableName: TABLES.LIKES, Key: { fromUserId: fromEmail, toUserId } }));
-
         res.json({ success: true, coins: coinUpdate.Attributes.coins });
     } catch (e) {
         console.error("[SWIPE FAIL]:", e.message);
@@ -149,26 +118,16 @@ app.post('/api/swipe/action', authenticateToken, async (req, res, next) => {
 });
 
 app.post('/api/coins/reward', authenticateToken, async (req, res) => {
-    try {
-        const update = await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email: req.user.email }, UpdateExpression: "SET coins = if_not_exists(coins, :start) + :r", ExpressionAttributeValues: { ":r": 5, ":start": 25 }, ReturnValues: "ALL_NEW" }));
-        res.json({ success: true, coins: update.Attributes.coins });
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    try { const update = await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email: req.user.email }, UpdateExpression: "SET coins = if_not_exists(coins, :start) + :r", ExpressionAttributeValues: { ":r": 5, ":start": 25 }, ReturnValues: "ALL_NEW" })); res.json({ success: true, coins: update.Attributes.coins }); }
+    catch (e) { res.status(500).json({ error: e.message }); }
 });
 app.post('/api/referral/credit', authenticateToken, async (req, res) => {
-    try {
-        const { code } = req.body;
-        const all = await ddb.send(new ScanCommand({ TableName: TABLES.USERS }));
-        const referrer = all.Items.find(u => u.referralCode === code);
-        if (referrer) { await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email: referrer.email }, UpdateExpression: "SET coins = if_not_exists(coins, :start) + :b", ExpressionAttributeValues: { ":b": 50, ":start": 25 } })); res.json({ success: true }); }
-        else { res.status(404).json({ error: "Invalid code" }); }
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    try { const { code } = req.body; const all = await ddb.send(new ScanCommand({ TableName: TABLES.USERS })); const referrer = all.Items.find(u => u.referralCode === code); if (referrer) { await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email: referrer.email }, UpdateExpression: "SET coins = if_not_exists(coins, :start) + :b", ExpressionAttributeValues: { ":b": 50, ":start": 25 } })); res.json({ success: true }); } else { res.status(404).json({ error: "Invalid code" }); } }
+    catch (e) { res.status(500).json({ error: e.message }); }
 });
 app.get('/api/swipe/leaderboard', async (req, res) => {
-    try {
-        const result = await ddb.send(new ScanCommand({ TableName: TABLES.USERS }));
-        const list = (result.Items || []).sort((a, b) => (b.coins || 0) - (a.coins || 0)).map((u, i) => ({ rank: i + 1, email: u.email, name: u.name, coins: u.coins || 0, photoUri: u.photoUri || u.photoUrl || "", badgeType: u.badgeType || "NONE" }));
-        res.json({ leaderboard: list });
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    try { const result = await ddb.send(new ScanCommand({ TableName: TABLES.USERS })); const list = (result.Items || []).sort((a, b) => (b.coins || 0) - (a.coins || 0)).map((u, i) => ({ rank: i + 1, email: u.email, name: u.name, coins: u.coins || 0, photoUri: u.photoUri || u.photoUrl || "", badgeType: u.badgeType || "NONE" })); res.json({ leaderboard: list }); }
+    catch (e) { res.status(500).json({ error: e.message }); }
 });
 app.post('/api/account/deactivate', authenticateToken, async (req, res) => {
     try { await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email: req.user.email }, UpdateExpression: "SET isDeactivated = :v", ExpressionAttributeValues: { ":v": true } })); res.json({ success: true }); }
@@ -187,19 +146,12 @@ app.post('/profile/save', authenticateToken, async (req, res) => {
     catch (e) { res.status(500).json({ error: e.message }); }
 });
 app.post('/image/upload', async (req, res) => {
-    try {
-        const data = require('qs').stringify({ image: req.body.base64Image.split(',')[1] || req.body.base64Image });
-        const resp = await require('axios').post(`https://api.imgbb.com/1/upload?key=${IMGBB_KEY}`, data);
-        res.json({ url: resp.data.data.url });
-    } catch (e) { res.status(500).json({ error: "Upload fail" }); }
+    try { const data = require('qs').stringify({ image: req.body.base64Image.split(',')[1] || req.body.base64Image }); const resp = await require('axios').post(`https://api.imgbb.com/1/upload?key=${IMGBB_KEY}`, data); res.json({ url: resp.data.data.url }); }
+    catch (e) { res.status(500).json({ error: "Upload fail" }); }
 });
 async function startBot() {
-    try {
-        const { state, saveCreds } = await useMultiFileAuthState(__dirname + '/auth_info');
-        const sock = makeWASocket({ auth: state, logger: pino({ level: 'silent' }), printQRInTerminal: false });
-        sock.ev.on('creds.update', saveCreds);
-        sock.ev.on('connection.update', (u) => { if (u.connection === 'open') console.log('✅ Bot Alive!'); });
-    } catch (e) { console.error("WA Bot Error:", e.message); }
+    try { const { state, saveCreds } = await useMultiFileAuthState(__dirname + '/auth_info'); const sock = makeWASocket({ auth: state, logger: pino({ level: 'silent' }), printQRInTerminal: false }); sock.ev.on('creds.update', saveCreds); sock.ev.on('connection.update', (u) => { if (u.connection === 'open') console.log('✅ Bot Alive!'); }); }
+    catch (e) { console.error("WA Bot Error:", e.message); }
 }
 startBot();
 masterServer.listen(4000, () => console.log('🚀 ULTIMATE SUBDIVIDED SERVER READY ON PORT 4000'));
