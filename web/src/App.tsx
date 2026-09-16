@@ -1,165 +1,74 @@
 import { FormEvent, useEffect, useMemo, useState } from 'react'
-import { Heart, LogOut, MessageCircle, SlidersHorizontal, Sparkles, UserRound, X } from 'lucide-react'
+import { Heart, Search, UserRound, MessageCircle, SlidersHorizontal, Sparkles, X, Check, Send, Image as ImageIcon, Coins, Camera, Bell, Volume2, Moon, Sun, Shield, HelpCircle, LogOut, ChevronRight, ArrowLeft, Gift, Crown, Trash2, Ban, Settings, Users, Star } from 'lucide-react'
 
-type User = {
-  id?: string
-  userId?: string
-  email?: string
-  name?: string
-  age?: number
-  gender?: string
-  photoUri?: string
-  secondaryPhotos?: string[]
-  country?: string
-  state?: string
+type User={id?:string;userId?:string;email?:string;name?:string;age?:number;gender?:string;photoUri?:string;secondaryPhotos?:string[];country?:string;state?:string;dob?:string;bio?:string;height?:string;religion?:string;education?:string;profession?:string;diet?:string;habits?:string;language?:string;intentions?:string;interests?:string;coins?:number;isPremium?:boolean;isBlocked?:boolean}
+type Swipe={fromUserId:string;toUserId:string;action:string;timestamp:number}
+type Match={matchId?:string;user1Id?:string;user2Id?:string;otherUser?:User;[key:string]:unknown}
+type Message={matchId?:string;timestamp?:number;senderId?:string;content?:string;imageUrl?:string}
+type Sync={user?:User;sent?:Swipe[];incoming?:Swipe[];matches?:Match[]}
+type Auth={token:string;user:User}
+const API=(import.meta.env.VITE_API_BASE_URL||'https://nameless-thunder-8f79tinklet-api.sm231219933.workers.dev').replace(/\/$/,'')
+async function api<T>(path:string,options:RequestInit={}):Promise<T>{const h=new Headers(options.headers);if(!(options.body instanceof FormData))h.set('Content-Type','application/json');const t=localStorage.getItem('tinklet_token');if(t)h.set('Authorization',`Bearer ${t}`);const r=await fetch(`${API}${path}`,{...options,headers:h});const txt=await r.text();let d:any={};try{d=txt?JSON.parse(txt):{}}catch{d={error:txt}}if(!r.ok)throw new Error(d.error||d.message||`Request failed (${r.status})`);return d}
+const id=(u?:User)=>u?.userId||u?.id||u?.email||''
+const img=(u?:User)=>u?.photoUri||u?.secondaryPhotos?.[0]||''
+const details=(u?:User)=>[['Gender',u?.gender],['Date of birth',u?.dob],['Height',u?.height],['Religion',u?.religion],['Education',u?.education],['Profession',u?.profession],['Diet',u?.diet],['Habits',u?.habits],['Language',u?.language],['Intentions',u?.intentions],['Interests',u?.interests]].filter(x=>x[1])
+
+export default function App(){
+ const [user,setUser]=useState<User|null>(()=>{try{return JSON.parse(localStorage.getItem('tinklet_user')||'null')}catch{return null}})
+ const [email,setEmail]=useState(''),[password,setPassword]=useState(''),[busy,setBusy]=useState(false),[error,setError]=useState('')
+ const [tab,setTab]=useState<'discover'|'inbox'|'matches'|'chats'|'me'>('discover')
+ const [feed,setFeed]=useState<User[]>([]),[idx,setIdx]=useState(0),[sent,setSent]=useState<Swipe[]>([]),[incoming,setIncoming]=useState<Swipe[]>([]),[matches,setMatches]=useState<Match[]>([]),[people,setPeople]=useState<Record<string,User>>({})
+ const [requestMain,setRequestMain]=useState<'received'|'sent'>('received'),[requestSub,setRequestSub]=useState<'requests'|'superlikes'|'rejected'>('requests')
+ const [selected,setSelected]=useState<User|null>(null),[screen,setScreen]=useState<'none'|'filters'|'profileDetail'|'editProfile'|'photos'|'coins'|'subscription'|'settings'|'privacy'|'support'|'geo'>('none')
+ const [activeMatch,setActiveMatch]=useState<Match|null>(null),[messages,setMessages]=useState<Message[]>([]),[message,setMessage]=useState(''),[chatBusy,setChatBusy]=useState(false),[notice,setNotice]=useState('')
+ const [filters,setFilters]=useState({minAge:18,maxAge:60,gender:'',country:'',state:'',religion:'',habit:'',language:'',intention:''})
+ const [profileForm,setProfileForm]=useState<User>({}),[theme,setTheme]=useState('System'),[notifications,setNotifications]=useState(true),[sounds,setSounds]=useState(true)
+ const current=useMemo(()=>feed[idx],[feed,idx]);const me=id(user)
+ const saveUser=(u:User)=>{setUser(u);localStorage.setItem('tinklet_user',JSON.stringify(u))}
+ const sync=async()=>{try{const d=await api<Sync>('/api/sync/all');if(d.user)saveUser(d.user);setSent(d.sent||[]);setIncoming(d.incoming||[]);setMatches(d.matches||[])}catch(e){setNotice(e instanceof Error?e.message:'Sync failed')}}
+ const load=async()=>{try{const d=await api<{feed:User[]}>('/api/swipe/feed');setFeed(d.feed||[]);setIdx(0);setPeople(p=>({...p,...(d.feed||[]).reduce<Record<string,User>>((a,u)=>({...a,[id(u)]:u}),{})}))}catch(e){setNotice(e instanceof Error?e.message:'Feed failed')}await sync()}
+ useEffect(()=>{if(user)void load()},[user])
+ async function login(e:FormEvent){e.preventDefault();setBusy(true);setError('');try{const d=await api<Auth>('/api/auth/login',{method:'POST',body:JSON.stringify({email:email.trim(),password})});localStorage.setItem('tinklet_token',d.token);localStorage.setItem('tinklet_user',JSON.stringify(d.user));setUser(d.user)}catch(e){setError(e instanceof Error?e.message:'Login failed')}finally{setBusy(false)}}
+ function logout(){localStorage.removeItem('tinklet_token');localStorage.removeItem('tinklet_user');setUser(null)}
+ async function swipe(action:string){if(!current)return;try{const d=await api<{matched?:boolean}>('/api/swipe/action',{method:'POST',body:JSON.stringify({toUserId:id(current),action})});setNotice(d.matched?'It’s a match! ❤️':action==='like'?'Like sent':action==='superlike'?'Superlike sent':'Skipped');setIdx(i=>i+1);await sync()}catch(e){setNotice(e instanceof Error?e.message:'Action failed')}}
+ async function requestAction(other:string,action:string){try{const d=await api<{matched?:boolean}>('/api/swipe/action',{method:'POST',body:JSON.stringify({toUserId:other,action})});setNotice(d.matched?'It’s a match! ❤️':'Done');await sync()}catch(e){setNotice(e instanceof Error?e.message:'Action failed')}}
+ async function openChat(m:Match){setActiveMatch(m);setChatBusy(true);try{const d=await api<any>(`/messages/${m.matchId}`);setMessages(Array.isArray(d)?d:d.messages||[])}catch(e){setNotice(e instanceof Error?e.message:'Could not load chat')}finally{setChatBusy(false)}}
+ async function send(){if(!message.trim()||!activeMatch?.matchId)return;const text=message.trim();setMessage('');try{const d=await api<any>('/messages/send',{method:'POST',body:JSON.stringify({matchId:activeMatch.matchId,senderId:me,content:text})});setMessages(m=>[...m,d?.message||{senderId:me,content:text,timestamp:Date.now()}])}catch(e){setMessage(text);setNotice(e instanceof Error?e.message:'Message failed')}}
+ if(!user)return <main className="auth-page"><section className="auth-card"><div className="brand"><span className="brand-heart">♥</span>Tinklet</div><p className="tagline">Free Dating App</p><h1>Welcome back</h1><p className="muted">Login with your existing Tinklet account.</p><form className="login-form" onSubmit={login}><label>Email<input type="email" value={email} onChange={e=>setEmail(e.target.value)} required/></label><label>Password<input type="password" value={password} onChange={e=>setPassword(e.target.value)} required/></label>{error&&<div className="error">{error}</div>}<button className="primary" disabled={busy}>{busy?'Logging in…':'Login'}</button></form><div className="signup-note"><Sparkles size={17}/>New accounts are created in the Android app.</div><p className="small">Website signup is intentionally disabled.</p></section></main>
+ if(activeMatch)return <Chat match={activeMatch} me={me} messages={messages} message={message} setMessage={setMessage} send={()=>void send()} busy={chatBusy} back={()=>setActiveMatch(null)} other={activeMatch.otherUser||people[String(activeMatch.user1Id===me?activeMatch.user2Id:activeMatch.user1Id)]}/>
+ const nav=[['discover',Search,'Tinklet'],['inbox',UserRound,'Inbox'],['matches',Heart,'Matches'],['chats',MessageCircle,'Chats'],['me',UserRound,'Me']] as const
+ const requestList=(requestMain==='received'?incoming:sent).filter(s=>{const a=s.action.toLowerCase();return requestSub==='requests'?(a.includes('like')&&!a.includes('super')):requestSub==='superlikes'?a.includes('super'):a.includes('reject')})
+ return <main className="app-shell"><header className="mobile-header"><div className="brand"><span className="brand-heart">♥</span>Tinklet<span className="brand-heart">♥</span></div><div className="coin"><Coins size={18}/>{user.coins??25}</div><button onClick={()=>setScreen('filters')}><SlidersHorizontal/></button></header><section className="content">
+  {tab==='discover'&&<Discover current={current} onDetail={()=>{setSelected(current||null);setScreen('profileDetail')}} onFilter={()=>setScreen('filters')} swipe={swipe}/>} 
+  {tab==='inbox'&&<Requests list={requestList} people={people} main={requestMain} sub={requestSub} setMain={setRequestMain} setSub={setRequestSub} received={incoming.length} sent={sent.length} me={me} action={requestAction} detail={u=>{setSelected(u);setScreen('profileDetail')}}/>}
+  {tab==='matches'&&<Matches matches={matches} people={people} me={me} open={m=>void openChat(m)} detail={u=>{setSelected(u);setScreen('profileDetail')}}/>}
+  {tab==='chats'&&<Matches matches={matches} people={people} me={me} open={m=>void openChat(m)} detail={u=>{setSelected(u);setScreen('profileDetail')} } chats/>}
+  {tab==='me'&&<Me user={user} setScreen={s=>setScreen(s)} theme={theme} setTheme={setTheme} notifications={notifications} setNotifications={setNotifications} sounds={sounds} setSounds={setSounds} logout={logout}/>} 
+ </section><nav className="bottom-nav">{nav.map(([key,Icon,label])=><button key={key} className={tab===key?'active':''} onClick={()=>setTab(key)}><Icon size={25} fill={tab===key&&key==='matches'?'currentColor':'none'}/><span>{label}</span></button>)}</nav>
+ {selected&&screen==='profileDetail'&&<ProfileDetail user={selected} close={()=>{setSelected(null);setScreen('none')}} like={()=>{setSelected(null);void swipe('like')}} superlike={()=>{setSelected(null);void swipe('superlike')}}/>}
+ {screen==='filters'&&<Filters value={filters} setValue={setFilters} close={()=>setScreen('none')} apply={()=>{setScreen('none');setNotice('Filters applied')}}/>}
+ {screen==='editProfile'&&<EditProfile user={user} close={()=>setScreen('none')} save={async u=>{try{const d=await api<any>('/profile/save',{method:'POST',body:JSON.stringify(u)});saveUser(d.user||u);setScreen('none');setNotice('Profile saved')}catch(e){setNotice(e instanceof Error?e.message:'Could not save profile')}}}/>} 
+ {screen==='photos'&&<Photos user={user} close={()=>setScreen('none')}/>} {screen==='coins'&&<CoinsScreen user={user} close={()=>setScreen('none')}/>} {screen==='subscription'&&<Subscription close={()=>setScreen('none')}/>} {screen==='settings'&&<SettingsScreen theme={theme} setTheme={setTheme} notifications={notifications} setNotifications={setNotifications} sounds={sounds} setSounds={setSounds} close={()=>setScreen('none')} />}{screen==='privacy'&&<InfoScreen title="Privacy Policy" icon={<Shield/>} close={()=>setScreen('none')}/>} {screen==='support'&&<InfoScreen title="Support & Help" icon={<HelpCircle/>} close={()=>setScreen('none')} support/>}{screen==='geo'&&<InfoScreen title="Location & Availability" icon={<Users/>} close={()=>setScreen('none')}/>} {notice&&<button className="notice" onClick={()=>setNotice('')}>{notice}</button>}</main>
 }
 
-type AuthResponse = { token: string; user: User }
+function Discover({current,onDetail,onFilter,swipe}:{current?:User;onDetail:()=>void;onFilter:()=>void;swipe:(a:string)=>void}){return <><div className="page-title"><div><small>DISCOVER</small><h1>Meet new people</h1></div><button className="outline" onClick={onFilter}><SlidersHorizontal size={18}/> Filters</button></div>{current?<article className="profile-card" onClick={onDetail}><div className="hero-photo">{img(current)?<img src={img(current)} alt="Profile"/>:<UserRound size={100}/>}<div className="photo-overlay"><b>{current.name||'Tinklet User'}{current.age?`, ${current.age}`:''}</b><span>● Online</span></div><button className="arrow" onClick={e=>{e.stopPropagation();onDetail()}}>›</button></div><div className="profile-summary"><p>📍 {[current.state,current.country].filter(Boolean).join(', ')}</p>{current.bio&&<p>{current.bio}</p>}<button className="text-button">View full profile <ChevronRight size={17}/></button></div><div className="swipe-actions"><button className="reject" onClick={e=>{e.stopPropagation();swipe('reject')}}><X/></button><button className="super" onClick={e=>{e.stopPropagation();swipe('superlike')}}><Star fill="currentColor"/></button><button className="like" onClick={e=>{e.stopPropagation();swipe('like')}}><Heart fill="currentColor"/></button></div></article>:<Empty title="No more profiles" text="Check back later for new people."/>}</>}
 
-const API_BASE = (import.meta.env.VITE_API_BASE_URL || 'https://nameless-thunder-8f79tinklet-api.sm231219933.workers.dev').replace(/\/$/, '')
+function Requests(p:{list:Swipe[];people:Record<string,User>;main:'received'|'sent';sub:'requests'|'superlikes'|'rejected';setMain:(x:'received'|'sent')=>void;setSub:(x:'requests'|'superlikes'|'rejected')=>void;received:number;sent:number;me:string;action:(id:string,a:string)=>void;detail:(u:User)=>void}){return <><div className="page-title"><div><small>INBOX</small><h1>Requests</h1></div></div><div className="tabs"><button className={p.main==='received'?'active':''} onClick={()=>p.setMain('received')}>Received ({p.received})</button><button className={p.main==='sent'?'active':''} onClick={()=>p.setMain('sent')}>Sent ({p.sent})</button></div><div className="subtabs">{(['requests','superlikes','rejected'] as const).map(x=><button className={p.sub===x?'active':''} onClick={()=>p.setSub(x)} key={x}>{x[0].toUpperCase()+x.slice(1)}</button>)}</div><div className="request-grid">{p.list.map((s,i)=>{const other=s.fromUserId===p.me?s.toUserId:s.fromUserId;const u=p.people[other];return <article className="request-card" key={other+i} onClick={()=>u&&p.detail(u)}><Avatar user={u}/><div><b>{u?.name||'Tinklet member'}{u?.age?`, ${u.age}`:''}</b><span>{[u?.state,u?.country].filter(Boolean).join(', ')}</span><small>{s.action.replace('_',' ')} · {new Date(s.timestamp||Date.now()).toLocaleDateString()}</small></div>{p.main==='received'?<aside><button onClick={e=>{e.stopPropagation();p.action(other,'reject')}}><X/></button><button onClick={e=>{e.stopPropagation();p.action(other,'like')}}><Check/></button></aside>:<button className="cancel" onClick={e=>{e.stopPropagation();p.action(other,'cancel')}}>Cancel</button>}</article>})}</div>{!p.list.length&&<Empty title="Nothing here yet" text="Your request activity will appear here."/>}</>}
 
-async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
-  const token = localStorage.getItem('tinklet_token')
-  const headers = new Headers(options.headers)
-  headers.set('Content-Type', 'application/json')
-  if (token) headers.set('Authorization', `Bearer ${token}`)
-  const response = await fetch(`${API_BASE}${path}`, { ...options, headers })
-  if (!response.ok) throw new Error((await response.text()) || `Request failed (${response.status})`)
-  return response.json() as Promise<T>
-}
+function Matches({matches,people,me,open,detail,chats=false}:{matches:Match[];people:Record<string,User>;me:string;open:(m:Match)=>void;detail:(u:User)=>void;chats?:boolean}){const [q,setQ]=useState('');const list=matches.filter(m=>{const u=m.otherUser||people[String(m.user1Id===me?m.user2Id:m.user1Id)];return (u?.name||'').toLowerCase().includes(q.toLowerCase())});return <><div className="page-title"><div><small>{chats?'CHATS':'MATCHES'}</small><h1>{chats?'Conversations':'Your matches'}</h1></div></div><div className="search"><Search size={18}/><input placeholder="Search by name…" value={q} onChange={e=>setQ(e.target.value)}/></div><div className="match-list">{list.map((m,i)=>{const u=m.otherUser||people[String(m.user1Id===me?m.user2Id:m.user1Id)];return <article key={m.matchId||i} onClick={()=>chats?open(m):u&&detail(u)}><Avatar user={u}/><div><b>{u?.name||'Tinklet member'}</b><span>{chats?'Tap to open conversation':'Mutual connection'}</span></div><ChevronRight/></article>})}</div>{!list.length&&<Empty title={chats?'No conversations':'No matches yet'} text={chats?'Matched chats will appear here.':'Like someone who likes you back.'}/>}</>}
 
-function App() {
-  const [user, setUser] = useState<User | null>(() => {
-    try { return JSON.parse(localStorage.getItem('tinklet_user') || 'null') } catch { return null }
-  })
-  const [loginError, setLoginError] = useState('')
-  const [email, setEmail] = useState('')
-  const [password, setPassword] = useState('')
-  const [feed, setFeed] = useState<User[]>([])
-  const [feedIndex, setFeedIndex] = useState(0)
-  const [loading, setLoading] = useState(false)
-  const [notice, setNotice] = useState('')
-  const [view, setView] = useState<'discover' | 'matches'>('discover')
-
-  useEffect(() => {
-    if (!user) return
-    api<{ feed: User[] }>('/api/swipe/feed')
-      .then(data => { setFeed(data.feed || []); setFeedIndex(0) })
-      .catch(error => setNotice(error.message))
-  }, [user])
-
-  const current = useMemo(() => feed[feedIndex], [feed, feedIndex])
-
-  async function login(event: FormEvent) {
-    event.preventDefault()
-    setLoginError('')
-    setLoading(true)
-    try {
-      const data = await api<AuthResponse>('/api/auth/login', {
-        method: 'POST',
-        body: JSON.stringify({ email: email.trim(), password })
-      })
-      localStorage.setItem('tinklet_token', data.token)
-      localStorage.setItem('tinklet_user', JSON.stringify(data.user))
-      setUser(data.user)
-    } catch (error) {
-      setLoginError(error instanceof Error ? error.message : 'Login failed')
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  function logout() {
-    localStorage.removeItem('tinklet_token')
-    localStorage.removeItem('tinklet_user')
-    setUser(null)
-    setFeed([])
-    setFeedIndex(0)
-  }
-
-  async function swipe(action: 'like' | 'dislike' | 'superlike') {
-    if (!current) return
-    try {
-      const result = await api<{ matched: boolean }>('/api/swipe/action', {
-        method: 'POST',
-        body: JSON.stringify({ toUserId: current.id || current.userId, action })
-      })
-      setNotice(result.matched ? 'It’s a match! ❤️' : action === 'like' ? 'Like sent' : '')
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : 'Could not update this profile')
-    } finally {
-      setFeedIndex(index => index + 1)
-    }
-  }
-
-  if (!user) {
-    return (
-      <main className="auth-page">
-        <section className="auth-card">
-          <div className="brand"><span className="brand-heart">♥</span><span>Tinklet</span></div>
-          <p className="tagline">Free Dating App</p>
-          <h1>Welcome back</h1>
-          <p className="muted">Login to continue meeting new people.</p>
-          <form onSubmit={login} className="login-form">
-            <label>Email<input value={email} onChange={e => setEmail(e.target.value)} type="email" autoComplete="username" placeholder="Enter your email" required /></label>
-            <label>Password<input value={password} onChange={e => setPassword(e.target.value)} type="password" autoComplete="current-password" placeholder="Enter your password" required /></label>
-            {loginError && <div className="error">{loginError}</div>}
-            <button className="primary" disabled={loading}>{loading ? 'Logging in…' : 'Login'}</button>
-          </form>
-          <div className="signup-note">
-            <Sparkles size={17} />
-            <span>New accounts are created in the Tinklet Android app.</span>
-          </div>
-          <p className="small">Website login only · No website registration</p>
-        </section>
-      </main>
-    )
-  }
-
-  return (
-    <main className="app-shell">
-      <header className="topbar">
-        <div className="brand"><span className="brand-heart">♥</span><span>Tinklet</span></div>
-        <nav>
-          <button className={view === 'discover' ? 'nav-active' : ''} onClick={() => setView('discover')}><Sparkles size={18}/>Discover</button>
-          <button className={view === 'matches' ? 'nav-active' : ''} onClick={() => setView('matches')}><MessageCircle size={18}/>Matches</button>
-        </nav>
-        <button className="icon-button" onClick={logout} title="Logout"><LogOut size={19}/></button>
-      </header>
-
-      <section className="content">
-        <div className="welcome-row">
-          <div><p className="eyebrow">Welcome back</p><h1>{user.name || user.email || 'Tinklet member'}</h1></div>
-          <button className="filter-button"><SlidersHorizontal size={18}/> Filters</button>
-        </div>
-
-        {view === 'matches' ? (
-          <div className="empty-panel"><MessageCircle size={42}/><h2>Your matches</h2><p>Your matched conversations will appear here.</p></div>
-        ) : current ? (
-          <div className="discovery-area">
-            <article className="profile-card">
-              <div className="photo-wrap">
-                {current.photoUri ? <img src={current.photoUri} alt={current.name || 'Profile'} /> : <div className="photo-placeholder"><UserRound size={76}/></div>}
-                <div className="online-pill">● Online</div>
-              </div>
-              <div className="profile-info">
-                <h2>{current.name || 'Tinklet member'}{current.age ? <span>, {current.age}</span> : null}</h2>
-                {(current.state || current.country) && <p>{[current.state, current.country].filter(Boolean).join(', ')}</p>}
-                <div className="profile-actions">
-                  <button className="round dislike" onClick={() => swipe('dislike')}><X size={25}/></button>
-                  <button className="round super" onClick={() => swipe('superlike')}><Sparkles size={23}/></button>
-                  <button className="round like" onClick={() => swipe('like')}><Heart size={25} fill="currentColor"/></button>
-                </div>
-              </div>
-            </article>
-          </div>
-        ) : (
-          <div className="empty-panel"><Heart size={42}/><h2>No more profiles</h2><p>Check back later for more people.</p></div>
-        )}
-        {notice && <button className="notice" onClick={() => setNotice('')}>{notice}</button>}
-      </section>
-    </main>
-  )
-}
-
-export default App
+function Me({user,setScreen,theme,setTheme,notifications,setNotifications,sounds,setSounds,logout}:{user:User;setScreen:(s:any)=>void;theme:string;setTheme:(s:string)=>void;notifications:boolean;setNotifications:(b:boolean)=>void;sounds:boolean;setSounds:(b:boolean)=>void;logout:()=>void}){const items=[[EditIcon,'Edit Profile Details','editProfile'],[Camera,'My Photos','photos'],[Coins,'Coin Center','coins'],[Crown,'Subscription','subscription'],[Bell,`Notifications: ${notifications?'ON':'OFF'}`,'notifications'],[Volume2,`Interaction Sounds: ${sounds?'ON':'OFF'}`,'sounds'],[theme==='Dark'?Moon:Sun,`Theme: ${theme}`,'theme'],[HelpCircle,'Support & Help','support'],[Shield,'Privacy Policy','privacy']] as const;return <><div className="page-title"><div><small>ACCOUNT</small><h1>Me</h1></div></div><div className="me-card"><Avatar user={user} large/><h2>{user.name||'Tinklet User'}{user.age?`, ${user.age}`:''}</h2><p>📍 {[user.state,user.country].filter(Boolean).join(', ')}</p><div className="stats"><div><Coins/><b>{user.coins??0}</b><span>Coins</span></div><div><Crown/><b>{user.isPremium?'Premium':'Free'}</b><span>Status</span></div></div></div><div className="menu-card">{items.map(([I,label,key])=><button key={key} onClick={()=>key==='notifications'?setNotifications(!notifications):key==='sounds'?setSounds(!sounds):key==='theme'?setTheme(theme==='Light'?'Dark':theme==='Dark'?'System':'Light'):setScreen(key)}><I/><span>{label}</span><ChevronRight/></button>)}</div><div className="danger"><b>Danger Zone</b><button>Deactivate</button><button className="delete" onClick={logout}><LogOut/> Logout</button></div></>}
+const EditIcon=Settings
+function ProfileDetail({user,close,like,superlike}:{user:User;close:()=>void;like:()=>void;superlike:()=>void}){return <div className="overlay"><div className="sheet detail-sheet"><header><button onClick={close}><ArrowLeft/></button><b>Profile</b><button><MoreIcon/></button></header><div className="detail-photo">{img(user)?<img src={img(user)} alt="Profile"/>:<UserRound size={100}/>}</div><div className="sheet-body"><h2>{user.name||'Tinklet User'}{user.age?`, ${user.age}`:''}</h2><p>📍 {[user.state,user.country].filter(Boolean).join(', ')}</p>{user.bio&&<p className="bio">{user.bio}</p>}<div className="detail-grid">{details(user).map(([k,v])=><div key={String(k)}><small>{String(k)}</small><b>{String(v)}</b></div>)}</div><div className="modal-actions"><button className="reject" onClick={close}><X/></button><button className="super" onClick={superlike}><Star/></button><button className="like" onClick={like}><Heart fill="currentColor"/></button></div></div></div></div>}
+const MoreIcon=SlidersHorizontal
+function Filters({value,setValue,close,apply}:{value:any;setValue:(v:any)=>void;close:()=>void;apply:()=>void}){return <Modal title="Discover Filters" close={close}><div className="form-grid"><label>Minimum age<input type="number" value={value.minAge} onChange={e=>setValue({...value,minAge:+e.target.value})}/></label><label>Maximum age<input type="number" value={value.maxAge} onChange={e=>setValue({...value,maxAge:+e.target.value})}/></label><label>Gender<select value={value.gender} onChange={e=>setValue({...value,gender:e.target.value})}><option value="">Any</option><option>Male</option><option>Female</option><option>Other</option></select></label><label>Country<input value={value.country} onChange={e=>setValue({...value,country:e.target.value})}/></label><label>State<input value={value.state} onChange={e=>setValue({...value,state:e.target.value})}/></label><label>Religion<input value={value.religion} onChange={e=>setValue({...value,religion:e.target.value})}/></label><label>Habits<input value={value.habit} onChange={e=>setValue({...value,habit:e.target.value})}/></label><label>Language<input value={value.language} onChange={e=>setValue({...value,language:e.target.value})}/></label><label>Intentions<input value={value.intention} onChange={e=>setValue({...value,intention:e.target.value})}/></label></div><button className="primary" onClick={apply}>Apply Filters</button></Modal>}
+function EditProfile({user,close,save}:{user:User;close:()=>void;save:(u:User)=>void}){const [f,setF]=useState<User>(user);const set=(k:keyof User,v:any)=>setF(x=>({...x,[k]:v}));return <Modal title="Edit Profile" close={close}><div className="form-grid">{(['name','dob','gender','height','education','profession','religion','country','state','diet','habits','language','intentions','interests'] as const).map(k=><label key={k}>{k.replace(/([A-Z])/g,' $1')}<input value={String(f[k]??'')} onChange={e=>set(k,e.target.value)}/></label>)}<label className="wide">Bio<textarea value={f.bio||''} onChange={e=>set('bio',e.target.value)}/></label></div><button className="primary" onClick={()=>save(f)}>Save Profile</button></Modal>}
+function Photos({user,close}:{user:User|null;close:()=>void}){const photos=[img(user),...(user?.secondaryPhotos||[])].filter(Boolean);return <Modal title="My Photos" close={close}><div className="photo-grid">{photos.map((p,i)=><img key={i} src={p} alt={`Photo ${i+1}`}/>)}{!photos.length&&<Empty title="No photos uploaded" text="Your Android app photos will appear here."/>}</div><button className="outline wide-button"><Camera/> Upload Photos</button></Modal>}
+function CoinsScreen({user,close}:{user:User;close:()=>void}){return <Modal title="Tinklet Coin Center" close={close}><div className="coin-balance"><Coins size={55}/><small>Current Balance</small><strong>{user.coins??0} Coins</strong></div><h3>Earn Coins</h3><div className="action-cards"><button><Gift/>Daily Reward <b>+Coins</b></button><button><Users/>Referral <b>Earn Coins</b></button><button><Star/>Badges <b>Bronze · Silver · Golden</b></button><button><Crown/>Rich List <b>View leaderboard</b></button></div></Modal>}
+function Subscription({close}:{close:()=>void}){const plans=[['Trial Pack','₹10','1 Day'],['Monthly','₹99','30 Days'],['Quarterly','₹279','90 Days'],['Yearly','₹819','365 Days']];return <Modal title="Tinklet Gold" close={close}><div className="gold-head"><Crown size={45}/><h2>Unlimited Tinklet</h2><p>Unlimited likes · profile boost · global filters</p></div>{plans.map(p=><div className="plan" key={p[0]}><div><b>{p[0]}</b><span>{p[2]}</span></div><button>{p[1]}</button></div>)}<p className="muted center">Payment integration follows the Android subscription flow.</p></Modal>}
+function SettingsScreen(p:{theme:string;setTheme:(s:string)=>void;notifications:boolean;setNotifications:(b:boolean)=>void;sounds:boolean;setSounds:(b:boolean)=>void;close:()=>void}){return <Modal title="Settings" close={p.close}><div className="settings-list"><button onClick={()=>p.setNotifications(!p.notifications)}><Bell/><span>Notifications</span><b>{p.notifications?'ON':'OFF'}</b></button><button onClick={()=>p.setSounds(!p.sounds)}><Volume2/><span>Interaction Sounds</span><b>{p.sounds?'ON':'OFF'}</b></button><button onClick={()=>p.setTheme(p.theme==='Light'?'Dark':p.theme==='Dark'?'System':'Light')}><Sun/><span>Theme</span><b>{p.theme}</b></button></div></Modal>}
+function InfoScreen({title,icon,close,support=false}:{title:string;icon:any;close:()=>void;support?:boolean}){return <Modal title={title} close={close}><div className="info-page">{icon}<h2>{title}</h2><p>{support?'For support, use the Tinklet support channel linked to your account.':'Your Tinklet account information and controls are handled according to the policies shown in the Android app.'}</p>{support&&<button className="primary" onClick={()=>{window.location.href='mailto:support@tinklet.in'}}>Contact Support</button>}</div></Modal>}
+function Modal({title,close,children}:{title:string;close:()=>void;children:any}){return <div className="overlay"><div className="modal"><header><h2>{title}</h2><button onClick={close}><X/></button></header><div className="modal-content">{children}</div></div></div>}
+function Avatar({user,large=false}:{user?:User;large?:boolean}){return <div className={`avatar ${large?'large':''}`}>{img(user)?<img src={img(user)} alt={user?.name||'Profile'}/>:<UserRound size={large?65:35}/>}</div>}
+function Chat(p:{match:Match;me:string;messages:Message[];message:string;setMessage:(s:string)=>void;send:()=>void;busy:boolean;back:()=>void;other?:User}){return <main className="chat-screen"><header><button onClick={p.back}><ArrowLeft/></button><Avatar user={p.other}/><div><b>{p.other?.name||'Tinklet member'}</b><span>{[p.other?.age,p.other?.state].filter(Boolean).join(' · ')}</span></div></header><div className="chat-messages">{p.busy?<Empty title="Loading chat…" text=""/>:p.messages.length?p.messages.map((m,i)=><div className={`bubble ${m.senderId===p.me?'mine':''}`} key={i}>{m.imageUrl&&<img src={m.imageUrl} alt="Shared"/>}{m.content&&<span>{m.content}</span>}</div>):<Empty title="Start the conversation" text="Send a message to your match."/>}</div><div className="chat-compose"><label><ImageIcon/><input type="file" accept="image/*"/></label><input value={p.message} onChange={e=>p.setMessage(e.target.value)} onKeyDown={e=>{if(e.key==='Enter')p.send()}} placeholder="Type a message…"/><button onClick={p.send}><Send/></button></div></main>}
+function Empty({title,text}:{title:string;text:string}){return <div className="empty"><Heart size={45}/><h2>{title}</h2><p>{text}</p></div>}
