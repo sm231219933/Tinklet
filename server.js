@@ -104,7 +104,32 @@ app.get('/api/sync/all', authenticateToken, async (req, res) => {
 // BLOCK 4: ACTION SUBDIVISIONS
 // ==========================================
 
-// 4A: SWIPE ACTION (LIKE/REJECT/SUPERLIKE)
+// ==========================================
+// BLOCK 4A: DISCOVERY FEED API (STABLE)
+// ==========================================
+app.get('/api/swipe/feed', authenticateToken, async (req, res) => {
+    try {
+        const myEmail = req.user.email;
+        const [allUsers, meRes] = await Promise.all([
+            ddb.send(new ScanCommand({ TableName: TABLES.USERS })),
+            ddb.send(new GetCommand({ TableName: TABLES.USERS, Key: { email: myEmail } }))
+        ]);
+        const me = meRes.Item || {};
+        const myInteractions = me.interactions || {};
+        const swiped = Object.keys(myInteractions).map(e => e.toLowerCase().trim());
+
+        const feed = (allUsers.Items || []).filter(u => {
+            if (!u.email) return false;
+            const target = u.email.toLowerCase().trim();
+            return target !== myEmail && !swiped.includes(target) && u.isDeactivated !== true;
+        }).map(u => ({ ...u, photoUri: u.photoUri || u.photoUrl || "" }));
+        res.json({ feed });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ==========================================
+// BLOCK 4B: SWIPE ACTIONS (ROBUST COINS)
+// ==========================================
 app.post('/api/swipe/action', authenticateToken, async (req, res, next) => {
     const action = (req.body.action || "").toUpperCase();
     if (action === 'ACCEPT') return next(); 
@@ -112,25 +137,35 @@ app.post('/api/swipe/action', authenticateToken, async (req, res, next) => {
         const fromEmail = req.user.email;
         const toUserId = (req.body.toUserId || "").trim().toLowerCase();
         const cost = action === 'SUPERLIKE' ? 10 : (['REJECTED', 'LIKE'].includes(action) ? 1 : 0);
-        const updateRes = await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email: fromEmail }, UpdateExpression: action !== 'CANCEL' ? "SET coins = if_not_exists(coins, :start) - :cost, interactions = if_not_exists(interactions, :empty), interactions.#target = :act" : "REMOVE interactions.#target", ConditionExpression: "attribute_exists(email)", ExpressionAttributeNames: { "#target": toUserId }, ExpressionAttributeValues: action !== 'CANCEL' ? { ":cost": cost, ":empty": {}, ":act": action, ":start": 25 } : undefined, ReturnValues: "ALL_NEW" }));
+
+        // 1. DEDUCT COINS (Atomic)
+        const coinUpdate = await ddb.send(new UpdateCommand({
+            TableName: TABLES.USERS, Key: { email: fromEmail },
+            UpdateExpression: "SET coins = if_not_exists(coins, :start) - :cost",
+            ConditionExpression: "if_not_exists(coins, :start) >= :cost",
+            ExpressionAttributeValues: { ":cost": cost, ":start": 25 },
+            ReturnValues: "ALL_NEW"
+        }));
+
+        // 2. UPDATE INTERACTIONS (Separate for safety)
+        const updateExpr = action !== 'CANCEL' ? "SET interactions = if_not_exists(interactions, :empty), interactions.#target = :act" : "REMOVE interactions.#target";
+        await ddb.send(new UpdateCommand({
+            TableName: TABLES.USERS, Key: { email: fromEmail },
+            UpdateExpression: updateExpr,
+            ExpressionAttributeNames: { "#target": toUserId },
+            ExpressionAttributeValues: action !== 'CANCEL' ? { ":empty": {}, ":act": action } : undefined
+        }));
+
+        // 3. LOG TO LIKES TABLE
         if (action !== 'CANCEL') await ddb.send(new PutCommand({ TableName: TABLES.LIKES, Item: { fromUserId: fromEmail, toUserId, action, timestamp: Date.now() } }));
         else await ddb.send(new DeleteCommand({ TableName: TABLES.LIKES, Key: { fromUserId: fromEmail, toUserId } }));
-        res.json({ success: true, coins: updateRes.Attributes.coins });
-    } catch (e) { res.status(400).json({ error: "Insufficient coins" }); }
-});
 
-// 4B: MATCHING LOGIC (ACCEPT)
-app.post('/api/swipe/action', authenticateToken, async (req, res) => {
-    try {
-        const fromEmail = req.user.email;
-        const toUserId = req.body.toUserId.trim().toLowerCase();
-        const matchId = createMatchId(fromEmail, toUserId);
-        await ddb.send(new PutCommand({ TableName: TABLES.MATCHES, Item: { matchId, users: [fromEmail, toUserId], createdAt: Date.now() } }));
-        await ddb.send(new DeleteCommand({ TableName: TABLES.LIKES, Key: { fromUserId: toUserId, toUserId: fromEmail } }));
-        await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email: fromEmail }, UpdateExpression: "SET interactions.#target = :acc", ExpressionAttributeNames: { "#target": toUserId }, ExpressionAttributeValues: { ":acc": "ACCEPTED" } }));
-        await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email: toUserId }, UpdateExpression: "SET interactions.#target = :acc", ExpressionAttributeNames: { "#target": fromEmail }, ExpressionAttributeValues: { ":acc": "ACCEPTED" } }));
-        res.json({ success: true, matched: true, matchId });
-    } catch (e) { res.status(500).json({ error: e.message }); }
+        res.json({ success: true, coins: coinUpdate.Attributes.coins });
+    } catch (e) {
+        console.error("[SWIPE FAIL]:", e.message);
+        if (e.name === "ConditionalCheckFailedException") return res.status(400).json({ error: "Insufficient coins" });
+        res.status(500).json({ error: "Server technical error" });
+    }
 });
 
 // ==========================================
