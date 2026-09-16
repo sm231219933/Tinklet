@@ -1,0 +1,43 @@
+name: Fix backend sync payload
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Patch server sync response
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('server.js')
+          s = p.read_text()
+          old = '''res.json({ user: profileMap[email], sent: (sent.Items || []).map(l => ({ ...profileMap[l.toUserId.toLowerCase()], connectionStatus: l.action })).filter(p => p.email), incoming: (incoming.Items || []).map(l => ({ ...profileMap[l.fromUserId.toLowerCase()], connectionStatus: "PENDING" })).filter(p => p.email), matches: (matches.Items || []).map(m => ({ ...profileMap[m.users.find(u => u.toLowerCase() !== email).toLowerCase()], connectionStatus: "ACCEPTED" })).filter(p => p.email) });'''
+          new = '''res.json({
+              user: profileMap[email],
+              sent: (sent.Items || []).map(l => ({ fromUserId: l.fromUserId, toUserId: l.toUserId, action: l.action, timestamp: l.timestamp || 0 })),
+              incoming: (incoming.Items || []).map(l => ({ fromUserId: l.fromUserId, toUserId: l.toUserId, action: l.action, timestamp: l.timestamp || 0 })),
+              matches: (matches.Items || [])
+          });'''
+          if old not in s:
+              raise SystemExit('Expected sync response block not found; refusing to change anything.')
+          p.write_text(s.replace(old, new, 1))
+          PY
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add server.js
+          git diff --cached --quiet && exit 0
+          git commit -m "Fix sync payload for inbox"
+          git push
