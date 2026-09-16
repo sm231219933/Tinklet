@@ -84,9 +84,9 @@ interface DatingApiService {
 
 data class SyncAllResponse(
     val user: UserProfile? = null,
-    val sent: List<SwipeActionRecord>,
-    val incoming: List<SwipeActionRecord>,
-    val matches: List<Map<String, Any>>
+    val sent: List<SwipeActionRecord> = emptyList(),
+    val incoming: List<SwipeActionRecord> = emptyList(),
+    val matches: List<Map<String, Any>> = emptyList()
 )
 
 data class SwipeActionRecord(
@@ -97,10 +97,10 @@ data class SwipeActionRecord(
 )
 
 data class SignupRequest(
-    val email: String, 
-    val password: String, 
-    val name: String, 
-    val age: Int, 
+    val email: String,
+    val password: String,
+    val name: String,
+    val age: Int,
     val gender: String,
     val photoUri: String = "",
     val secondaryPhotos: List<String> = emptyList()
@@ -108,7 +108,13 @@ data class SignupRequest(
 data class LoginRequest(val email: String, val password: String)
 data class AuthResponse(val token: String, val user: UserProfile)
 data class SwipeActionRequest(val toUserId: String, val action: String)
-data class SwipeActionResponse(val matched: Boolean, val matchId: String?)
+data class SwipeActionResponse(
+    val matched: Boolean = false,
+    val matchId: String? = null,
+    val coins: Int? = null,
+    val success: Boolean = false,
+    val error: String? = null
+)
 data class FeedResponse(val feed: List<UserProfile>)
 data class MatchesResponse(val matches: List<Map<String, Any>>)
 
