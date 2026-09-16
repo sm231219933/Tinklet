@@ -89,11 +89,11 @@ app.get('/api/sync/all', authenticateToken, async (req, res) => {
         const incoming = await ddb.send(new QueryCommand({ TableName: TABLES.LIKES, IndexName: "toUserId-index", KeyConditionExpression: "toUserId = :me", ExpressionAttributeValues: { ":me": email } }));
         const matches = await ddb.send(new ScanCommand({ TableName: TABLES.MATCHES, FilterExpression: "contains(#u, :me)", ExpressionAttributeNames: { "#u": "users" }, ExpressionAttributeValues: { ":me": email } }));
         res.json({
-    user: profileMap[email],
-    sent: (sent.Items || []).map(l => ({ fromUserId: l.fromUserId, toUserId: l.toUserId, action: l.action, timestamp: l.timestamp || 0 })),
-    incoming: (incoming.Items || []).map(l => ({ fromUserId: l.fromUserId, toUserId: l.toUserId, action: l.action, timestamp: l.timestamp || 0 })),
-    matches: (matches.Items || [])
-});
+            user: profileMap[email],
+            sent: (sent.Items || []).map(l => ({ fromUserId: l.fromUserId, toUserId: l.toUserId, action: l.action, timestamp: l.timestamp || 0 })),
+            incoming: (incoming.Items || []).map(l => ({ fromUserId: l.fromUserId, toUserId: l.toUserId, action: l.action, timestamp: l.timestamp || 0 })),
+            matches: (matches.Items || [])
+        });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -127,8 +127,33 @@ app.post('/api/swipe/action', authenticateToken, async (req, res, next) => {
             await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email: fromEmail }, UpdateExpression: "SET coins = if_not_exists(coins, :start)", ExpressionAttributeValues: { ":start": 25 } }));
         }
         const coinUpdate = await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email: fromEmail }, UpdateExpression: "SET coins = coins - :cost", ConditionExpression: "coins >= :cost", ExpressionAttributeValues: { ":cost": cost }, ReturnValues: "ALL_NEW" }));
-        const updateExpr = action !== 'CANCEL' ? "SET interactions = if_not_exists(interactions, :empty), interactions.#target = :act" : "REMOVE interactions.#target";
-        await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email: fromEmail }, UpdateExpression: updateExpr, ExpressionAttributeNames: { "#target": toUserId }, ExpressionAttributeValues: action !== 'CANCEL' ? { ":empty": {}, ":act": action } : undefined }));
+
+        // DynamoDB does not allow updating a parent map and one of its child paths
+        // in the same UpdateExpression. Ensure the map exists first, then update it.
+        await ddb.send(new UpdateCommand({
+            TableName: TABLES.USERS,
+            Key: { email: fromEmail },
+            UpdateExpression: "SET interactions = if_not_exists(interactions, :empty)",
+            ExpressionAttributeValues: { ":empty": {} }
+        }));
+
+        if (action !== 'CANCEL') {
+            await ddb.send(new UpdateCommand({
+                TableName: TABLES.USERS,
+                Key: { email: fromEmail },
+                UpdateExpression: "SET interactions.#target = :act",
+                ExpressionAttributeNames: { "#target": toUserId },
+                ExpressionAttributeValues: { ":act": action }
+            }));
+        } else {
+            await ddb.send(new UpdateCommand({
+                TableName: TABLES.USERS,
+                Key: { email: fromEmail },
+                UpdateExpression: "REMOVE interactions.#target",
+                ExpressionAttributeNames: { "#target": toUserId }
+            }));
+        }
+
         if (action !== 'CANCEL') await ddb.send(new PutCommand({ TableName: TABLES.LIKES, Item: { fromUserId: fromEmail, toUserId, action, timestamp: Date.now() } }));
         else await ddb.send(new DeleteCommand({ TableName: TABLES.LIKES, Key: { fromUserId: fromEmail, toUserId } }));
         res.json({ success: true, coins: coinUpdate.Attributes.coins });
