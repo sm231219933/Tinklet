@@ -40,7 +40,7 @@ function createMatchId(u1, u2) { return crypto.createHash("sha256").update([u1.t
 app.post('/api/auth/signup', async (req, res) => {
     try {
         const email = req.body.email.trim().toLowerCase();
-        const newUser = { ...req.body, email, userId: uuidv4(), coins: 25, interactions: {}, createdAt: new Date().toISOString() };
+        const newUser = { ...req.body, email, userId: uuidv4(), coins: 25, coinInitializedV2: true, interactions: {}, createdAt: new Date().toISOString() };
         await ddb.send(new PutCommand({ TableName: TABLES.USERS, Item: newUser }));
         res.json({ token: jwt.sign({ email }, JWT_SECRET), user: newUser });
     } catch (e) { res.status(500).json({ error: e.message }); }
@@ -55,8 +55,25 @@ app.post('/api/auth/login', async (req, res) => {
             await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email }, UpdateExpression: "SET isDeactivated = :f REMOVE deletionRequestedAt", ExpressionAttributeValues: { ":f": false } }));
             try { await ddb.send(new DeleteCommand({ TableName: TABLES.DELETION, Key: { email } })); } catch(err) {}
         }
-        if (result.Item.coins === undefined || result.Item.coins === null || Number(result.Item.coins) < 0) {
-            await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email }, UpdateExpression: "SET coins = :coins", ExpressionAttributeValues: { ":coins": 25 } }));
+
+        // One-time migration for older accounts created before the 25-coin rule.
+        // New accounts are marked at signup, so their legitimate zero balance is never reset.
+        if (result.Item.coinInitializedV2 !== true) {
+            await ddb.send(new UpdateCommand({
+                TableName: TABLES.USERS,
+                Key: { email },
+                UpdateExpression: "SET coins = :coins, coinInitializedV2 = :v",
+                ExpressionAttributeValues: { ":coins": 25, ":v": true }
+            }));
+            result.Item.coins = 25;
+            result.Item.coinInitializedV2 = true;
+        } else if (result.Item.coins === undefined || result.Item.coins === null || Number.isNaN(Number(result.Item.coins))) {
+            await ddb.send(new UpdateCommand({
+                TableName: TABLES.USERS,
+                Key: { email },
+                UpdateExpression: "SET coins = :coins",
+                ExpressionAttributeValues: { ":coins": 25 }
+            }));
             result.Item.coins = 25;
         }
         res.json({ token: jwt.sign({ email: result.Item.email }, JWT_SECRET), user: result.Item });
@@ -141,9 +158,40 @@ app.post('/api/report', authenticateToken, async (req, res) => {
     try { await ddb.send(new PutCommand({ TableName: TABLES.REPORTS, Item: { reportId: uuidv4(), reporter: req.user.email, target: req.body.targetEmail, reason: req.body.reason, timestamp: Date.now() } })); res.json({ success: true }); }
     catch (e) { res.status(500).json({ error: e.message }); }
 });
+
+// Save profile fields without replacing the whole DynamoDB user record.
+// This preserves coins, password, interactions and other server-owned fields.
 app.post('/profile/save', authenticateToken, async (req, res) => {
-    try { await ddb.send(new PutCommand({ TableName: TABLES.USERS, Item: req.body })); res.json({ success: true }); }
-    catch (e) { res.status(500).json({ error: e.message }); }
+    try {
+        const email = req.user.email;
+        const allowed = { ...req.body };
+        delete allowed.email;
+        delete allowed.coins;
+        delete allowed.password;
+        delete allowed.userId;
+        delete allowed.interactions;
+        delete allowed.coinInitializedV2;
+        const names = {};
+        const values = {};
+        const sets = [];
+        Object.entries(allowed).forEach(([key, value], index) => {
+            if (key === 'email' || value === undefined) return;
+            const nk = `#p${index}`;
+            const vk = `:p${index}`;
+            names[nk] = key;
+            values[vk] = value;
+            sets.push(`${nk} = ${vk}`);
+        });
+        if (sets.length === 0) return res.json({ success: true });
+        await ddb.send(new UpdateCommand({
+            TableName: TABLES.USERS,
+            Key: { email },
+            UpdateExpression: `SET ${sets.join(', ')}`,
+            ExpressionAttributeNames: names,
+            ExpressionAttributeValues: values
+        }));
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
 });
 app.post('/image/upload', async (req, res) => {
     try { const data = require('qs').stringify({ image: req.body.base64Image.split(',')[1] || req.body.base64Image }); const resp = await require('axios').post(`https://api.imgbb.com/1/upload?key=${IMGBB_KEY}`, data); res.json({ url: resp.data.data.url }); }
