@@ -133,7 +133,7 @@ data class MessageRequest(val matchId: String, val senderId: String, val content
 data class RemoteMessage(val matchId: String, val timestamp: Long, val senderId: String, val content: String)
 
 object RetrofitClient {
-    private const val BASE_URL = "http://13.232.145.39:4000/"
+    private const val BASE_URL = "http://15.252.204.160:4000/"
 
     private lateinit var prefs: android.content.SharedPreferences
 
