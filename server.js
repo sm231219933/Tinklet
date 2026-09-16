@@ -76,16 +76,7 @@ app.post('/api/auth/login', async (req, res) => {
 // BLOCK 3: DISCOVERY & SYNC SUBDIVISIONS
 // ==========================================
 
-// 3A: DISCOVERY FEED API
-app.get('/api/swipe/feed', authenticateToken, async (req, res) => {
-    try {
-        const myEmail = req.user.email;
-        const [allUsers, me] = await Promise.all([ ddb.send(new ScanCommand({ TableName: TABLES.USERS })), ddb.send(new GetCommand({ TableName: TABLES.USERS, Key: { email: myEmail } })) ]);
-        const swiped = Object.keys(me.Item?.interactions || {}).map(e => e.toLowerCase().trim());
-        const feed = (allUsers.Items || []).filter(u => u.email && u.email.toLowerCase().trim() !== myEmail && !swiped.includes(u.email.toLowerCase().trim()) && u.isDeactivated !== true).map(u => ({ ...u, photoUri: u.photoUri || u.photoUrl || "" }));
-        res.json({ feed });
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
+
 
 // 3B: SYNC ALL API (Full Inbox Sync)
 app.get('/api/sync/all', authenticateToken, async (req, res) => {
