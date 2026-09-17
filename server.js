@@ -37,6 +37,33 @@ function authenticateToken(req, res, next) {
 }
 function createMatchId(u1, u2) { return crypto.createHash("sha256").update([u1.toLowerCase(), u2.toLowerCase()].sort().join(":")).digest("hex").substring(0, 32); }
 
+async function setInteractionStatus(email, targetEmail, status) {
+    const user = await ddb.send(new GetCommand({
+        TableName: TABLES.USERS,
+        Key: { email }
+    }));
+    const interactions = user.Item?.interactions;
+
+    if (interactions && typeof interactions === "object") {
+        await ddb.send(new UpdateCommand({
+            TableName: TABLES.USERS,
+            Key: { email },
+            UpdateExpression: "SET interactions.#target = :status",
+            ExpressionAttributeNames: { "#target": targetEmail },
+            ExpressionAttributeValues: { ":status": status }
+        }));
+    } else {
+        await ddb.send(new UpdateCommand({
+            TableName: TABLES.USERS,
+            Key: { email },
+            UpdateExpression: "SET interactions = :interactions",
+            ExpressionAttributeValues: {
+                ":interactions": { [targetEmail]: status }
+            }
+        }));
+    }
+}
+
 app.post('/api/auth/signup', async (req, res) => {
     try {
         const email = req.body.email.trim().toLowerCase();
@@ -111,33 +138,153 @@ app.get('/api/swipe/feed', authenticateToken, async (req, res) => {
 });
 
 app.post('/api/swipe/action', authenticateToken, async (req, res) => {
-    const action = (req.body.action || "").toUpperCase();
+    const action = String(req.body.action || "").trim().toUpperCase();
     try {
-        const fromEmail = req.user.email;
-        const toUserId = (req.body.toUserId || "").trim().toLowerCase();
+        const fromEmail = req.user.email.trim().toLowerCase();
+        const toUserId = String(req.body.toUserId || "").trim().toLowerCase();
         if (!toUserId || toUserId === fromEmail) return res.status(400).json({ error: "Invalid target" });
 
+        // ACCEPT never costs coins. It accepts only a real incoming LIKE/SUPERLIKE.
+        if (action === "ACCEPT") {
+            const incoming = await ddb.send(new GetCommand({
+                TableName: TABLES.LIKES,
+                Key: { fromUserId: toUserId, toUserId: fromEmail }
+            }));
+            const incomingAction = String(incoming.Item?.action || "").toUpperCase();
+
+            if (!["LIKE", "SUPERLIKE"].includes(incomingAction)) {
+                return res.status(400).json({ error: "Request not found" });
+            }
+
+            const matchId = createMatchId(fromEmail, toUserId);
+            const now = Date.now();
+
+            await ddb.send(new PutCommand({
+                TableName: TABLES.MATCHES,
+                Item: { matchId, users: [fromEmail, toUserId], timestamp: now }
+            }));
+
+            await setInteractionStatus(fromEmail, toUserId, "ACCEPTED");
+            await setInteractionStatus(toUserId, fromEmail, "ACCEPTED");
+
+            await ddb.send(new PutCommand({
+                TableName: TABLES.LIKES,
+                Item: {
+                    fromUserId: toUserId,
+                    toUserId: fromEmail,
+                    action: "ACCEPTED",
+                    previousAction: incomingAction,
+                    timestamp: now
+                }
+            }));
+
+            await ddb.send(new PutCommand({
+                TableName: TABLES.LIKES,
+                Item: {
+                    fromUserId: fromEmail,
+                    toUserId,
+                    action: "ACCEPTED",
+                    previousAction: incomingAction,
+                    timestamp: now
+                }
+            }));
+
+            const meAfterAccept = await ddb.send(new GetCommand({
+                TableName: TABLES.USERS,
+                Key: { email: fromEmail }
+            }));
+
+            return res.json({
+                success: true,
+                matched: true,
+                matchId,
+                coins: Number(meAfterAccept.Item?.coins || 0)
+            });
+        }
+
+        // LIKE / SUPERLIKE: if the other user already liked us, create a match immediately.
         if (action === "LIKE" || action === "SUPERLIKE") {
-            const reverse = await ddb.send(new GetCommand({ TableName: TABLES.LIKES, Key: { fromUserId: toUserId, toUserId: fromEmail } }));
+            const reverse = await ddb.send(new GetCommand({
+                TableName: TABLES.LIKES,
+                Key: { fromUserId: toUserId, toUserId: fromEmail }
+            }));
             const reverseAction = String(reverse.Item?.action || "").toUpperCase();
+
             if (["LIKE", "SUPERLIKE"].includes(reverseAction)) {
                 const matchId = createMatchId(fromEmail, toUserId);
                 const now = Date.now();
-                await ddb.send(new PutCommand({ TableName: TABLES.MATCHES, Item: { matchId, users: [fromEmail, toUserId], timestamp: now } }));
-                await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email: fromEmail }, UpdateExpression: "SET interactions = if_not_exists(interactions, :empty), interactions.#target = :accepted", ExpressionAttributeNames: { "#target": toUserId }, ExpressionAttributeValues: { ":empty": {}, ":accepted": "ACCEPTED" } }));
-                await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email: toUserId }, UpdateExpression: "SET interactions = if_not_exists(interactions, :empty), interactions.#target = :accepted", ExpressionAttributeNames: { "#target": fromEmail }, ExpressionAttributeValues: { ":empty": {}, ":accepted": "ACCEPTED" } }));
-                await ddb.send(new PutCommand({ TableName: TABLES.LIKES, Item: { fromUserId: fromEmail, toUserId, action: "ACCEPTED", timestamp: now, previousAction: action } }));
-                await ddb.send(new PutCommand({ TableName: TABLES.LIKES, Item: { fromUserId: toUserId, toUserId: fromEmail, action: "ACCEPTED", timestamp: now, previousAction: reverseAction } }));
-                const meAfterMatch = await ddb.send(new GetCommand({ TableName: TABLES.USERS, Key: { email: fromEmail } }));
-                return res.json({ success: true, matched: true, matchId, coins: Number(meAfterMatch.Item?.coins || 0) });
+
+                await ddb.send(new PutCommand({
+                    TableName: TABLES.MATCHES,
+                    Item: { matchId, users: [fromEmail, toUserId], timestamp: now }
+                }));
+
+                await setInteractionStatus(fromEmail, toUserId, "ACCEPTED");
+                await setInteractionStatus(toUserId, fromEmail, "ACCEPTED");
+
+                await ddb.send(new PutCommand({
+                    TableName: TABLES.LIKES,
+                    Item: {
+                        fromUserId: fromEmail,
+                        toUserId,
+                        action: "ACCEPTED",
+                        timestamp: now,
+                        previousAction: action
+                    }
+                }));
+
+                await ddb.send(new PutCommand({
+                    TableName: TABLES.LIKES,
+                    Item: {
+                        fromUserId: toUserId,
+                        toUserId: fromEmail,
+                        action: "ACCEPTED",
+                        timestamp: now,
+                        previousAction: reverseAction
+                    }
+                }));
+
+                const meAfterMatch = await ddb.send(new GetCommand({
+                    TableName: TABLES.USERS,
+                    Key: { email: fromEmail }
+                }));
+
+                return res.json({
+                    success: true,
+                    matched: true,
+                    matchId,
+                    coins: Number(meAfterMatch.Item?.coins || 0)
+                });
             }
         }
 
-        const cost = action === 'SUPERLIKE' ? 10 : (["REJECTED", "LIKE"].includes(action) ? 1 : 0);
-        if (cost > 0) await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email: fromEmail }, UpdateExpression: "SET coins = if_not_exists(coins, :start)", ExpressionAttributeValues: { ":start": 25 } }));
-        const coinUpdate = await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email: fromEmail }, UpdateExpression: "SET coins = coins - :cost", ConditionExpression: "coins >= :cost", ExpressionAttributeValues: { ":cost": cost }, ReturnValues: "ALL_NEW" }));
+        // LIKE = 1, SUPERLIKE = 10, REJECTED = 1. ACCEPT = 0 (handled above).
+        const cost = action === "SUPERLIKE" ? 10 : (["REJECTED", "LIKE"].includes(action) ? 1 : 0);
 
-        await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email: fromEmail }, UpdateExpression: "SET interactions = if_not_exists(interactions, :empty)", ExpressionAttributeValues: { ":empty": {} } }));
+        let coinUpdate;
+        if (cost > 0) {
+            coinUpdate = await ddb.send(new UpdateCommand({
+                TableName: TABLES.USERS,
+                Key: { email: fromEmail },
+                UpdateExpression: "SET coins = if_not_exists(coins, :start) - :cost",
+                ConditionExpression: "attribute_not_exists(coins) OR coins >= :cost",
+                ExpressionAttributeValues: { ":start": 25, ":cost": cost },
+                ReturnValues: "ALL_NEW"
+            }));
+        } else {
+            const currentUser = await ddb.send(new GetCommand({
+                TableName: TABLES.USERS,
+                Key: { email: fromEmail }
+            }));
+            coinUpdate = { Attributes: { ...(currentUser.Item || {}), coins: Number(currentUser.Item?.coins || 0) } };
+        }
+
+        await ddb.send(new UpdateCommand({
+            TableName: TABLES.USERS,
+            Key: { email: fromEmail },
+            UpdateExpression: "SET interactions = if_not_exists(interactions, :empty)",
+            ExpressionAttributeValues: { ":empty": {} }
+        }));
 
         if (action === "CANCEL") {
             const current = await ddb.send(new GetCommand({ TableName: TABLES.LIKES, Key: { fromUserId: fromEmail, toUserId } }));
@@ -160,14 +307,14 @@ app.post('/api/swipe/action', authenticateToken, async (req, res) => {
             if (["LIKE", "SUPERLIKE"].includes(reverseAction)) {
                 await ddb.send(new PutCommand({ TableName: TABLES.LIKES, Item: { fromUserId: toUserId, toUserId: fromEmail, action: "REJECTED_BY_RECEIVER", previousAction: reverseAction, timestamp: Date.now() } }));
             }
-            await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email: fromEmail }, UpdateExpression: "SET interactions.#target = :act", ExpressionAttributeNames: { "#target": toUserId }, ExpressionAttributeValues: { ":act": "REJECTED" } }));
+            await setInteractionStatus(fromEmail, toUserId, "REJECTED");
             await ddb.send(new PutCommand({ TableName: TABLES.LIKES, Item: { fromUserId: fromEmail, toUserId, action: "REJECTED", timestamp: Date.now() } }));
             return res.json({ success: true, matched: false, coins: coinUpdate.Attributes.coins });
         }
 
-        await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email: fromEmail }, UpdateExpression: "SET interactions.#target = :act", ExpressionAttributeNames: { "#target": toUserId }, ExpressionAttributeValues: { ":act": action } }));
+        await setInteractionStatus(fromEmail, toUserId, action);
         await ddb.send(new PutCommand({ TableName: TABLES.LIKES, Item: { fromUserId: fromEmail, toUserId, action, timestamp: Date.now() } }));
-        res.json({ success: true, matched: false, coins: coinUpdate.Attributes.coins });
+        return res.json({ success: true, matched: false, coins: coinUpdate.Attributes.coins });
     } catch (e) {
         console.error("[SWIPE FAIL]:", e.message);
         if (e.name === "ConditionalCheckFailedException") return res.status(400).json({ error: "Insufficient coins" });
