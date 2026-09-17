@@ -55,25 +55,11 @@ app.post('/api/auth/login', async (req, res) => {
             await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email }, UpdateExpression: "SET isDeactivated = :f REMOVE deletionRequestedAt", ExpressionAttributeValues: { ":f": false } }));
             try { await ddb.send(new DeleteCommand({ TableName: TABLES.DELETION, Key: { email } })); } catch(err) {}
         }
-
-        // One-time migration for older accounts created before the 25-coin rule.
-        // New accounts are marked at signup, so their legitimate zero balance is never reset.
         if (result.Item.coinInitializedV2 !== true) {
-            await ddb.send(new UpdateCommand({
-                TableName: TABLES.USERS,
-                Key: { email },
-                UpdateExpression: "SET coins = :coins, coinInitializedV2 = :v",
-                ExpressionAttributeValues: { ":coins": 25, ":v": true }
-            }));
-            result.Item.coins = 25;
-            result.Item.coinInitializedV2 = true;
+            await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email }, UpdateExpression: "SET coins = :coins, coinInitializedV2 = :v", ExpressionAttributeValues: { ":coins": 25, ":v": true } }));
+            result.Item.coins = 25; result.Item.coinInitializedV2 = true;
         } else if (result.Item.coins === undefined || result.Item.coins === null || Number.isNaN(Number(result.Item.coins))) {
-            await ddb.send(new UpdateCommand({
-                TableName: TABLES.USERS,
-                Key: { email },
-                UpdateExpression: "SET coins = :coins",
-                ExpressionAttributeValues: { ":coins": 25 }
-            }));
+            await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email }, UpdateExpression: "SET coins = :coins", ExpressionAttributeValues: { ":coins": 25 } }));
             result.Item.coins = 25;
         }
         res.json({ token: jwt.sign({ email: result.Item.email }, JWT_SECRET), user: result.Item });
@@ -84,14 +70,26 @@ app.get('/api/sync/all', authenticateToken, async (req, res) => {
     try {
         const email = req.user.email;
         const allUsers = await ddb.send(new ScanCommand({ TableName: TABLES.USERS }));
-        const profileMap = {}; allUsers.Items.forEach(u => { if(u.email) profileMap[u.email.toLowerCase()] = { ...u, photoUri: u.photoUri || u.photoUrl || "" }; });
+        const profileMap = {};
+        (allUsers.Items || []).forEach(u => { if (u.email) profileMap[u.email.toLowerCase()] = { ...u, photoUri: u.photoUri || u.photoUrl || "" }; });
         const sent = await ddb.send(new QueryCommand({ TableName: TABLES.LIKES, KeyConditionExpression: "fromUserId = :me", ExpressionAttributeValues: { ":me": email } }));
-        const incoming = await ddb.send(new QueryCommand({ TableName: TABLES.LIKES, IndexName: "toUserId-index", KeyConditionExpression: "toUserId = :me", ExpressionAttributeValues: { ":me": email } }));
+
+        let incomingItems = [];
+        try {
+            const incomingGsi = await ddb.send(new QueryCommand({ TableName: TABLES.LIKES, IndexName: "toUserId-index", KeyConditionExpression: "toUserId = :me", ExpressionAttributeValues: { ":me": email } }));
+            incomingItems = incomingGsi.Items || [];
+        } catch (e) { console.error("[SYNC] Incoming GSI query failed:", e.message); }
+        const allLikes = await ddb.send(new ScanCommand({ TableName: TABLES.LIKES }));
+        const scannedIncoming = (allLikes.Items || []).filter(l => String(l.toUserId || "").trim().toLowerCase() === email);
+        const incomingMap = new Map();
+        [...incomingItems, ...scannedIncoming].forEach(l => incomingMap.set(`${String(l.fromUserId || "").toLowerCase()}::${String(l.toUserId || "").toLowerCase()}`, l));
+        const incoming = [...incomingMap.values()].filter(l => ["LIKE", "SUPERLIKE"].includes(String(l.action || "").toUpperCase()));
+
         const matches = await ddb.send(new ScanCommand({ TableName: TABLES.MATCHES, FilterExpression: "contains(#u, :me)", ExpressionAttributeNames: { "#u": "users" }, ExpressionAttributeValues: { ":me": email } }));
         res.json({
             user: profileMap[email],
             sent: (sent.Items || []).map(l => ({ fromUserId: l.fromUserId, toUserId: l.toUserId, action: l.action, timestamp: l.timestamp || 0 })),
-            incoming: (incoming.Items || []).map(l => ({ fromUserId: l.fromUserId, toUserId: l.toUserId, action: l.action, timestamp: l.timestamp || 0 })),
+            incoming: incoming.map(l => ({ fromUserId: l.fromUserId, toUserId: l.toUserId, action: l.action, timestamp: l.timestamp || 0 })),
             matches: (matches.Items || [])
         });
     } catch (e) { res.status(500).json({ error: e.message }); }
@@ -100,13 +98,9 @@ app.get('/api/sync/all', authenticateToken, async (req, res) => {
 app.get('/api/swipe/feed', authenticateToken, async (req, res) => {
     try {
         const myEmail = req.user.email;
-        const [allUsers, meRes] = await Promise.all([
-            ddb.send(new ScanCommand({ TableName: TABLES.USERS })),
-            ddb.send(new GetCommand({ TableName: TABLES.USERS, Key: { email: myEmail } }))
-        ]);
+        const [allUsers, meRes] = await Promise.all([ddb.send(new ScanCommand({ TableName: TABLES.USERS })), ddb.send(new GetCommand({ TableName: TABLES.USERS, Key: { email: myEmail } }))]);
         const me = meRes.Item || {};
-        const myInteractions = me.interactions || {};
-        const swiped = Object.keys(myInteractions).map(e => e.toLowerCase().trim());
+        const swiped = Object.keys(me.interactions || {}).map(e => e.toLowerCase().trim());
         const feed = (allUsers.Items || []).filter(u => {
             if (!u.email) return false;
             const target = u.email.toLowerCase().trim();
@@ -116,47 +110,64 @@ app.get('/api/swipe/feed', authenticateToken, async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-app.post('/api/swipe/action', authenticateToken, async (req, res, next) => {
+app.post('/api/swipe/action', authenticateToken, async (req, res) => {
     const action = (req.body.action || "").toUpperCase();
-    if (action === 'ACCEPT') return next();
     try {
         const fromEmail = req.user.email;
         const toUserId = (req.body.toUserId || "").trim().toLowerCase();
-        const cost = action === 'SUPERLIKE' ? 10 : (['REJECTED', 'LIKE'].includes(action) ? 1 : 0);
-        if (cost > 0) {
-            await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email: fromEmail }, UpdateExpression: "SET coins = if_not_exists(coins, :start)", ExpressionAttributeValues: { ":start": 25 } }));
+        if (!toUserId || toUserId === fromEmail) return res.status(400).json({ error: "Invalid target" });
+
+        if (action === "LIKE" || action === "SUPERLIKE") {
+            const reverse = await ddb.send(new GetCommand({ TableName: TABLES.LIKES, Key: { fromUserId: toUserId, toUserId: fromEmail } }));
+            const reverseAction = String(reverse.Item?.action || "").toUpperCase();
+            if (["LIKE", "SUPERLIKE"].includes(reverseAction)) {
+                const matchId = createMatchId(fromEmail, toUserId);
+                const now = Date.now();
+                await ddb.send(new PutCommand({ TableName: TABLES.MATCHES, Item: { matchId, users: [fromEmail, toUserId], timestamp: now } }));
+                await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email: fromEmail }, UpdateExpression: "SET interactions = if_not_exists(interactions, :empty), interactions.#target = :accepted", ExpressionAttributeNames: { "#target": toUserId }, ExpressionAttributeValues: { ":empty": {}, ":accepted": "ACCEPTED" } }));
+                await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email: toUserId }, UpdateExpression: "SET interactions = if_not_exists(interactions, :empty), interactions.#target = :accepted", ExpressionAttributeNames: { "#target": fromEmail }, ExpressionAttributeValues: { ":empty": {}, ":accepted": "ACCEPTED" } }));
+                await ddb.send(new PutCommand({ TableName: TABLES.LIKES, Item: { fromUserId: fromEmail, toUserId, action: "ACCEPTED", timestamp: now, previousAction: action } }));
+                await ddb.send(new PutCommand({ TableName: TABLES.LIKES, Item: { fromUserId: toUserId, toUserId: fromEmail, action: "ACCEPTED", timestamp: now, previousAction: reverseAction } }));
+                const meAfterMatch = await ddb.send(new GetCommand({ TableName: TABLES.USERS, Key: { email: fromEmail } }));
+                return res.json({ success: true, matched: true, matchId, coins: Number(meAfterMatch.Item?.coins || 0) });
+            }
         }
+
+        const cost = action === 'SUPERLIKE' ? 10 : (["REJECTED", "LIKE"].includes(action) ? 1 : 0);
+        if (cost > 0) await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email: fromEmail }, UpdateExpression: "SET coins = if_not_exists(coins, :start)", ExpressionAttributeValues: { ":start": 25 } }));
         const coinUpdate = await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email: fromEmail }, UpdateExpression: "SET coins = coins - :cost", ConditionExpression: "coins >= :cost", ExpressionAttributeValues: { ":cost": cost }, ReturnValues: "ALL_NEW" }));
 
-        // DynamoDB does not allow updating a parent map and one of its child paths
-        // in the same UpdateExpression. Ensure the map exists first, then update it.
-        await ddb.send(new UpdateCommand({
-            TableName: TABLES.USERS,
-            Key: { email: fromEmail },
-            UpdateExpression: "SET interactions = if_not_exists(interactions, :empty)",
-            ExpressionAttributeValues: { ":empty": {} }
-        }));
+        await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email: fromEmail }, UpdateExpression: "SET interactions = if_not_exists(interactions, :empty)", ExpressionAttributeValues: { ":empty": {} } }));
 
-        if (action !== 'CANCEL') {
-            await ddb.send(new UpdateCommand({
-                TableName: TABLES.USERS,
-                Key: { email: fromEmail },
-                UpdateExpression: "SET interactions.#target = :act",
-                ExpressionAttributeNames: { "#target": toUserId },
-                ExpressionAttributeValues: { ":act": action }
-            }));
-        } else {
-            await ddb.send(new UpdateCommand({
-                TableName: TABLES.USERS,
-                Key: { email: fromEmail },
-                UpdateExpression: "REMOVE interactions.#target",
-                ExpressionAttributeNames: { "#target": toUserId }
-            }));
+        if (action === "CANCEL") {
+            const current = await ddb.send(new GetCommand({ TableName: TABLES.LIKES, Key: { fromUserId: fromEmail, toUserId } }));
+            const currentAction = String(current.Item?.action || "").toUpperCase();
+            if (currentAction === "REJECTED") {
+                const reverse = await ddb.send(new GetCommand({ TableName: TABLES.LIKES, Key: { fromUserId: toUserId, toUserId: fromEmail } }));
+                if (String(reverse.Item?.action || "").toUpperCase() === "REJECTED_BY_RECEIVER") {
+                    const restored = reverse.Item?.previousAction || "LIKE";
+                    await ddb.send(new PutCommand({ TableName: TABLES.LIKES, Item: { fromUserId: toUserId, toUserId: fromEmail, action: restored, timestamp: Date.now() } }));
+                }
+            }
+            await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email: fromEmail }, UpdateExpression: "REMOVE interactions.#target", ExpressionAttributeNames: { "#target": toUserId } }));
+            await ddb.send(new DeleteCommand({ TableName: TABLES.LIKES, Key: { fromUserId: fromEmail, toUserId } }));
+            return res.json({ success: true, matched: false, coins: coinUpdate.Attributes.coins });
         }
 
-        if (action !== 'CANCEL') await ddb.send(new PutCommand({ TableName: TABLES.LIKES, Item: { fromUserId: fromEmail, toUserId, action, timestamp: Date.now() } }));
-        else await ddb.send(new DeleteCommand({ TableName: TABLES.LIKES, Key: { fromUserId: fromEmail, toUserId } }));
-        res.json({ success: true, coins: coinUpdate.Attributes.coins });
+        if (action === "REJECTED") {
+            const reverse = await ddb.send(new GetCommand({ TableName: TABLES.LIKES, Key: { fromUserId: toUserId, toUserId: fromEmail } }));
+            const reverseAction = String(reverse.Item?.action || "").toUpperCase();
+            if (["LIKE", "SUPERLIKE"].includes(reverseAction)) {
+                await ddb.send(new PutCommand({ TableName: TABLES.LIKES, Item: { fromUserId: toUserId, toUserId: fromEmail, action: "REJECTED_BY_RECEIVER", previousAction: reverseAction, timestamp: Date.now() } }));
+            }
+            await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email: fromEmail }, UpdateExpression: "SET interactions.#target = :act", ExpressionAttributeNames: { "#target": toUserId }, ExpressionAttributeValues: { ":act": "REJECTED" } }));
+            await ddb.send(new PutCommand({ TableName: TABLES.LIKES, Item: { fromUserId: fromEmail, toUserId, action: "REJECTED", timestamp: Date.now() } }));
+            return res.json({ success: true, matched: false, coins: coinUpdate.Attributes.coins });
+        }
+
+        await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email: fromEmail }, UpdateExpression: "SET interactions.#target = :act", ExpressionAttributeNames: { "#target": toUserId }, ExpressionAttributeValues: { ":act": action } }));
+        await ddb.send(new PutCommand({ TableName: TABLES.LIKES, Item: { fromUserId: fromEmail, toUserId, action, timestamp: Date.now() } }));
+        res.json({ success: true, matched: false, coins: coinUpdate.Attributes.coins });
     } catch (e) {
         console.error("[SWIPE FAIL]:", e.message);
         if (e.name === "ConditionalCheckFailedException") return res.status(400).json({ error: "Insufficient coins" });
@@ -165,8 +176,10 @@ app.post('/api/swipe/action', authenticateToken, async (req, res, next) => {
 });
 
 app.post('/api/coins/reward', authenticateToken, async (req, res) => {
-    try { const update = await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email: req.user.email }, UpdateExpression: "SET coins = if_not_exists(coins, :start) + :r", ExpressionAttributeValues: { ":r": 5, ":start": 25 }, ReturnValues: "ALL_NEW" })); res.json({ success: true, coins: update.Attributes.coins }); }
-    catch (e) { res.status(500).json({ error: e.message }); }
+    try {
+        const update = await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email: req.user.email }, UpdateExpression: "SET coins = if_not_exists(coins, :start) + :r", ExpressionAttributeValues: { ":r": 5, ":start": 25 }, ReturnValues: "ALL_NEW" }));
+        res.json({ success: true, coins: Number(update.Attributes.coins) });
+    } catch (e) { res.status(500).json({ error: e.message }); }
 });
 app.post('/api/referral/credit', authenticateToken, async (req, res) => {
     try { const { code } = req.body; const all = await ddb.send(new ScanCommand({ TableName: TABLES.USERS })); const referrer = all.Items.find(u => u.referralCode === code); if (referrer) { await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email: referrer.email }, UpdateExpression: "SET coins = if_not_exists(coins, :start) + :b", ExpressionAttributeValues: { ":b": 50, ":start": 25 } })); res.json({ success: true }); } else { res.status(404).json({ error: "Invalid code" }); } }
@@ -189,37 +202,15 @@ app.post('/api/report', authenticateToken, async (req, res) => {
     catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// Save profile fields without replacing the whole DynamoDB user record.
-// This preserves coins, password, interactions and other server-owned fields.
 app.post('/profile/save', authenticateToken, async (req, res) => {
     try {
         const email = req.user.email;
         const allowed = { ...req.body };
-        delete allowed.email;
-        delete allowed.coins;
-        delete allowed.password;
-        delete allowed.userId;
-        delete allowed.interactions;
-        delete allowed.coinInitializedV2;
-        const names = {};
-        const values = {};
-        const sets = [];
-        Object.entries(allowed).forEach(([key, value], index) => {
-            if (key === 'email' || value === undefined) return;
-            const nk = `#p${index}`;
-            const vk = `:p${index}`;
-            names[nk] = key;
-            values[vk] = value;
-            sets.push(`${nk} = ${vk}`);
-        });
+        delete allowed.email; delete allowed.coins; delete allowed.password; delete allowed.userId; delete allowed.interactions; delete allowed.coinInitializedV2;
+        const names = {}, values = {}, sets = [];
+        Object.entries(allowed).forEach(([key, value], index) => { if (key === 'email' || value === undefined) return; const nk = `#p${index}`, vk = `:p${index}`; names[nk] = key; values[vk] = value; sets.push(`${nk} = ${vk}`); });
         if (sets.length === 0) return res.json({ success: true });
-        await ddb.send(new UpdateCommand({
-            TableName: TABLES.USERS,
-            Key: { email },
-            UpdateExpression: `SET ${sets.join(', ')}`,
-            ExpressionAttributeNames: names,
-            ExpressionAttributeValues: values
-        }));
+        await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email }, UpdateExpression: `SET ${sets.join(', ')}`, ExpressionAttributeNames: names, ExpressionAttributeValues: values }));
         res.json({ success: true });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
