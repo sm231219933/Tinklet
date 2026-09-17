@@ -24,6 +24,7 @@ const ddb = DynamoDBDocumentClient.from(client);
 const JWT_SECRET = process.env.JWT_SECRET || 'tinklet_secret_2026';
 const IMGBB_KEY = process.env.IMGBB_KEY;
 const TABLES = { USERS: "Profiles", LIKES: "Likes", MATCHES: "Matches", REPORTS: "Reports", DELETION: "DeletionRequests" };
+const NO_COINS_MESSAGE = "No coins. Earn 5 coins by watching an ad or buy coins.";
 
 function authenticateToken(req, res, next) {
     const authHeader = req.headers['authorization'];
@@ -110,12 +111,71 @@ app.get('/api/swipe/feed', authenticateToken, async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// Dedicated, free ACCEPT flow. Match/ACCEPTED state is written only after all required writes succeed.
+app.post('/api/swipe/accept', authenticateToken, async (req, res) => {
+    try {
+        const fromEmail = req.user.email;
+        const toUserId = String(req.body.toUserId || "").trim().toLowerCase();
+        if (!toUserId || toUserId === fromEmail) return res.status(400).json({ error: "Invalid target" });
+
+        const reverse = await ddb.send(new GetCommand({
+            TableName: TABLES.LIKES,
+            Key: { fromUserId: toUserId, toUserId: fromEmail }
+        }));
+        const reverseAction = String(reverse.Item?.action || "").toUpperCase();
+        if (!["LIKE", "SUPERLIKE"].includes(reverseAction)) {
+            return res.status(400).json({ error: "No pending like to accept" });
+        }
+
+        const matchId = createMatchId(fromEmail, toUserId);
+        const now = Date.now();
+
+        await ddb.send(new PutCommand({
+            TableName: TABLES.MATCHES,
+            Item: { matchId, users: [fromEmail, toUserId], timestamp: now }
+        }));
+        await ddb.send(new UpdateCommand({
+            TableName: TABLES.USERS,
+            Key: { email: fromEmail },
+            UpdateExpression: "SET interactions = if_not_exists(interactions, :empty), interactions.#target = :accepted",
+            ExpressionAttributeNames: { "#target": toUserId },
+            ExpressionAttributeValues: { ":empty": {}, ":accepted": "ACCEPTED" }
+        }));
+        await ddb.send(new UpdateCommand({
+            TableName: TABLES.USERS,
+            Key: { email: toUserId },
+            UpdateExpression: "SET interactions = if_not_exists(interactions, :empty), interactions.#target = :accepted",
+            ExpressionAttributeNames: { "#target": fromEmail },
+            ExpressionAttributeValues: { ":empty": {}, ":accepted": "ACCEPTED" }
+        }));
+        await ddb.send(new PutCommand({
+            TableName: TABLES.LIKES,
+            Item: { fromUserId: fromEmail, toUserId, action: "ACCEPTED", timestamp: now, previousAction: "ACCEPT" }
+        }));
+        await ddb.send(new PutCommand({
+            TableName: TABLES.LIKES,
+            Item: { fromUserId: toUserId, toUserId: fromEmail, action: "ACCEPTED", timestamp: now, previousAction: reverseAction }
+        }));
+
+        const meAfterMatch = await ddb.send(new GetCommand({ TableName: TABLES.USERS, Key: { email: fromEmail } }));
+        return res.json({ success: true, matched: true, matchId, coins: Number(meAfterMatch.Item?.coins || 0) });
+    } catch (e) {
+        console.error("[ACCEPT FAIL]:", e.message);
+        res.status(500).json({ error: "Server technical error" });
+    }
+});
+
 app.post('/api/swipe/action', authenticateToken, async (req, res) => {
     const action = (req.body.action || "").toUpperCase();
     try {
         const fromEmail = req.user.email;
         const toUserId = (req.body.toUserId || "").trim().toLowerCase();
         if (!toUserId || toUserId === fromEmail) return res.status(400).json({ error: "Invalid target" });
+
+        if (action === "ACCEPT") {
+            req.body.toUserId = toUserId;
+            return res.redirect(307, '/api/swipe/accept');
+        }
 
         if (action === "LIKE" || action === "SUPERLIKE") {
             const reverse = await ddb.send(new GetCommand({ TableName: TABLES.LIKES, Key: { fromUserId: toUserId, toUserId: fromEmail } }));
@@ -170,7 +230,7 @@ app.post('/api/swipe/action', authenticateToken, async (req, res) => {
         res.json({ success: true, matched: false, coins: coinUpdate.Attributes.coins });
     } catch (e) {
         console.error("[SWIPE FAIL]:", e.message);
-        if (e.name === "ConditionalCheckFailedException") return res.status(400).json({ error: "Insufficient coins" });
+        if (e.name === "ConditionalCheckFailedException") return res.status(400).json({ error: NO_COINS_MESSAGE });
         res.status(500).json({ error: "Server technical error" });
     }
 });
@@ -194,12 +254,47 @@ app.post('/api/account/deactivate', authenticateToken, async (req, res) => {
     catch (e) { res.status(500).json({ error: e.message }); }
 });
 app.post('/api/account/delete-request', authenticateToken, async (req, res) => {
-    try { await ddb.send(new PutCommand({ TableName: TABLES.DELETION, Item: { email: req.user.email, requestedAt: Date.now(), status: "PENDING" } })); await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email: req.user.email }, UpdateExpression: "SET deletionRequestedAt = :t", ExpressionAttributeValues: { ":t": Date.now() } })); res.json({ success: true }); }
-    catch (e) { res.status(500).json({ error: e.message }); }
+    try {
+        const requestedAt = new Date();
+        const deleteAfter = new Date(requestedAt.getTime() + (30 * 24 * 60 * 60 * 1000));
+        const requestedAtIso = requestedAt.toISOString();
+        const deleteAfterIso = deleteAfter.toISOString();
+        await ddb.send(new PutCommand({
+            TableName: TABLES.DELETION,
+            Item: { email: req.user.email, requestedAt: requestedAtIso, deleteAfter: deleteAfterIso, status: "PENDING" }
+        }));
+        await ddb.send(new UpdateCommand({
+            TableName: TABLES.USERS,
+            Key: { email: req.user.email },
+            UpdateExpression: "SET deletionRequestedAt = :t",
+            ExpressionAttributeValues: { ":t": requestedAtIso }
+        }));
+        res.json({ success: true, requestedAt: requestedAtIso, deleteAfter: deleteAfterIso });
+    } catch (e) { res.status(500).json({ error: e.message }); }
 });
 app.post('/api/report', authenticateToken, async (req, res) => {
-    try { await ddb.send(new PutCommand({ TableName: TABLES.REPORTS, Item: { reportId: uuidv4(), reporter: req.user.email, target: req.body.targetEmail, reason: req.body.reason, timestamp: Date.now() } })); res.json({ success: true }); }
-    catch (e) { res.status(500).json({ error: e.message }); }
+    try {
+        const targetEmail = String(req.body.targetEmail || "").trim().toLowerCase();
+        const reason = String(req.body.reason || "").trim();
+        if (!targetEmail) return res.status(400).json({ error: "Target email is required" });
+        if (targetEmail === req.user.email) return res.status(400).json({ error: "Invalid target" });
+        const report = { reportId: uuidv4(), reporter: req.user.email, target: targetEmail, reason, timestamp: Date.now() };
+        await ddb.send(new PutCommand({ TableName: TABLES.REPORTS, Item: report }));
+        res.json({ success: true, reportId: report.reportId });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Compatibility endpoint for the Android report flow (saveReportSecure -> report/save).
+app.post('/report/save', authenticateToken, async (req, res) => {
+    try {
+        const targetEmail = String(req.body.targetEmail || "").trim().toLowerCase();
+        const reason = String(req.body.reason || "").trim();
+        if (!targetEmail) return res.status(400).json({ error: "Target email is required" });
+        if (targetEmail === req.user.email) return res.status(400).json({ error: "Invalid target" });
+        const report = { reportId: uuidv4(), reporter: req.user.email, target: targetEmail, reason, timestamp: Date.now() };
+        await ddb.send(new PutCommand({ TableName: TABLES.REPORTS, Item: report }));
+        res.json({ success: true, reportId: report.reportId });
+    } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.post('/profile/save', authenticateToken, async (req, res) => {
