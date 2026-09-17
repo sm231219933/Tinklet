@@ -194,8 +194,17 @@ app.post('/api/swipe/action', authenticateToken, async (req, res) => {
         }
 
         const cost = action === 'SUPERLIKE' ? 10 : (["REJECTED", "LIKE"].includes(action) ? 1 : 0);
-        if (cost > 0) await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email: fromEmail }, UpdateExpression: "SET coins = if_not_exists(coins, :start)", ExpressionAttributeValues: { ":start": 25 } }));
-        const coinUpdate = await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email: fromEmail }, UpdateExpression: "SET coins = coins - :cost", ConditionExpression: "coins >= :cost", ExpressionAttributeValues: { ":cost": cost }, ReturnValues: "ALL_NEW" }));
+        let coinUpdate = { Attributes: { coins: 0 } };
+        if (cost > 0) {
+            coinUpdate = await ddb.send(new UpdateCommand({
+                TableName: TABLES.USERS,
+                Key: { email: fromEmail },
+                UpdateExpression: "SET coins = if_not_exists(coins, :start) - :cost",
+                ConditionExpression: "attribute_not_exists(coins) OR coins >= :cost",
+                ExpressionAttributeValues: { ":start": 25, ":cost": cost },
+                ReturnValues: "ALL_NEW"
+            }));
+        }
 
         await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email: fromEmail }, UpdateExpression: "SET interactions = if_not_exists(interactions, :empty)", ExpressionAttributeValues: { ":empty": {} } }));
 
