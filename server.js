@@ -67,118 +67,14 @@ async function setInteractionStatus(email, targetEmail, status) {
 // ==========================================
 // IMAGE UPLOAD - COMPATIBLE WITH OLD + NEW APP
 // ==========================================
-
 app.post('/image/upload', async (req, res) => {
     try {
-        if (!IMGBB_KEY) {
-            return res.status(500).json({ error: "Image upload is not configured" });
-        }
-
-        const rawImage = String(
-            req.body.base64Image || req.body.base64 || ""
-        ).trim();
-
-        if (!rawImage) {
-            return res.status(400).json({ error: "Image data missing" });
-        }
-
-        const cleanBase64 = rawImage.includes(",")
-            ? rawImage.split(",")[1]
-            : rawImage;
-
-        const data = qs.stringify({
-            image: cleanBase64
-        });
-
-        const response = await axios.post(
-            `https://api.imgbb.com/1/upload?key=${IMGBB_KEY}`,
-            data,
-            {
-                headers: {
-                    "Content-Type": "application/x-www-form-urlencoded"
-                },
-                timeout: 120000
-            }
-        );
-
-        const imageUrl = response.data?.data?.url;
-
-        if (!imageUrl) {
-            return res.status(502).json({ error: "Image URL missing" });
-        }
-
-        return res.json({ url: imageUrl });
-
-    } catch (e) {
-        console.error(
-            "[IMAGE UPLOAD FAIL]",
-            e.response?.data || e.message
-        );
-
-        return res.status(500).json({
-            error: "Upload fail"
-        });
-    }
+        const data = require('qs').stringify({ image: req.body.base64Image.split(',')[1] || req.body.base64Image });
+        const resp = await require('axios').post(`https://api.imgbb.com/1/upload?key=${IMGBB_KEY}`, data);
+        res.json({ url: resp.data.data.url });
+    } catch (e) { res.status(500).json({ error: "Upload fail" }); }
 });
 
-app.post('/upload-image-secure', async (req, res) => {
-    try {
-        if (!IMGBB_KEY) {
-            return res.status(500).json({
-                error: "Image upload is not configured"
-            });
-        }
-
-        const rawImage = String(
-            req.body.base64 || req.body.base64Image || ""
-        ).trim();
-
-        if (!rawImage) {
-            return res.status(400).json({
-                error: "Image data missing"
-            });
-        }
-
-        const cleanBase64 = rawImage.includes(",")
-            ? rawImage.split(",")[1]
-            : rawImage;
-
-        const data = qs.stringify({
-            image: cleanBase64
-        });
-
-        const response = await axios.post(
-            `https://api.imgbb.com/1/upload?key=${IMGBB_KEY}`,
-            data,
-            {
-                headers: {
-                    "Content-Type": "application/x-www-form-urlencoded"
-                },
-                timeout: 120000
-            }
-        );
-
-        const imageUrl = response.data?.data?.url;
-
-        if (!imageUrl) {
-            return res.status(502).json({
-                error: "Image URL missing"
-            });
-        }
-
-        return res.json({ url: imageUrl });
-
-    } catch (e) {
-        console.error(
-            "[SECURE IMAGE UPLOAD FAIL]",
-            e.response?.data || e.message
-        );
-
-        return res.status(500).json({
-            error: "Image upload failed"
-        });
-    }
-});
 
 app.post('/api/auth/signup', async (req, res) => {
     try {
