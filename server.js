@@ -13,7 +13,7 @@ const axios = require('axios');
 const qs = require('qs');
 const { default: makeWASocket, useMultiFileAuthState } = require("@whiskeysockets/baileys");
 const pino = require('pino');
-const IMGBB_KEY = process.env.IMGBB_KEY;
+
 const app = express();
 app.use(cors());
 app.use(bodyParser.json({ limit: '50mb' }));
