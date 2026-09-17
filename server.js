@@ -13,7 +13,7 @@ const axios = require('axios');
 const qs = require('qs');
 const { default: makeWASocket, useMultiFileAuthState } = require("@whiskeysockets/baileys");
 const pino = require('pino');
-
+const IMGBB_KEY = process.env.IMGBB_KEY;
 const app = express();
 app.use(cors());
 app.use(bodyParser.json({ limit: '50mb' }));
@@ -63,6 +63,49 @@ async function setInteractionStatus(email, targetEmail, status) {
         }));
     }
 }
+
+app.post('/upload-image-secure', async (req, res) => {
+    try {
+        if (!IMGBB_KEY) {
+            return res.status(500).json({ error: "Image upload is not configured" });
+        }
+
+        const base64 = String(req.body.base64 || "").trim();
+
+        if (!base64) {
+            return res.status(400).json({ error: "Image data missing" });
+        }
+
+        const cleanBase64 = base64.replace(/^data:image\/\w+;base64,/, "");
+
+        const formData = new URLSearchParams();
+        formData.append("key", IMGBB_KEY);
+        formData.append("image", cleanBase64);
+
+        const response = await axios.post(
+            "https://api.imgbb.com/1/upload",
+            formData.toString(),
+            {
+                headers: {
+                    "Content-Type": "application/x-www-form-urlencoded"
+                },
+                timeout: 120000
+            }
+        );
+
+        const imageUrl = response.data?.data?.url;
+
+        if (!imageUrl) {
+            return res.status(502).json({ error: "Image URL missing" });
+        }
+
+        return res.json({ url: imageUrl });
+
+    } catch (e) {
+        console.error("[IMAGE UPLOAD]", e.response?.data || e.message);
+        return res.status(500).json({ error: "Image upload failed" });
+    }
+});
 
 app.post('/api/auth/signup', async (req, res) => {
     try {
