@@ -24,7 +24,6 @@ const ddb = DynamoDBDocumentClient.from(client);
 const JWT_SECRET = process.env.JWT_SECRET || 'tinklet_secret_2026';
 const IMGBB_KEY = process.env.IMGBB_KEY;
 const TABLES = { USERS: "Profiles", LIKES: "Likes", MATCHES: "Matches", REPORTS: "Reports", DELETION: "DeletionRequests" };
-const NO_COINS_MESSAGE = "No coins. Earn 5 coins by watching an ad or buy coins.";
 
 function authenticateToken(req, res, next) {
     const authHeader = req.headers['authorization'];
@@ -111,71 +110,12 @@ app.get('/api/swipe/feed', authenticateToken, async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// Dedicated, free ACCEPT flow. Match/ACCEPTED state is written only after all required writes succeed.
-app.post('/api/swipe/accept', authenticateToken, async (req, res) => {
-    try {
-        const fromEmail = req.user.email;
-        const toUserId = String(req.body.toUserId || "").trim().toLowerCase();
-        if (!toUserId || toUserId === fromEmail) return res.status(400).json({ error: "Invalid target" });
-
-        const reverse = await ddb.send(new GetCommand({
-            TableName: TABLES.LIKES,
-            Key: { fromUserId: toUserId, toUserId: fromEmail }
-        }));
-        const reverseAction = String(reverse.Item?.action || "").toUpperCase();
-        if (!["LIKE", "SUPERLIKE"].includes(reverseAction)) {
-            return res.status(400).json({ error: "No pending like to accept" });
-        }
-
-        const matchId = createMatchId(fromEmail, toUserId);
-        const now = Date.now();
-
-        await ddb.send(new PutCommand({
-            TableName: TABLES.MATCHES,
-            Item: { matchId, users: [fromEmail, toUserId], timestamp: now }
-        }));
-        await ddb.send(new UpdateCommand({
-            TableName: TABLES.USERS,
-            Key: { email: fromEmail },
-            UpdateExpression: "SET interactions = if_not_exists(interactions, :empty), interactions.#target = :accepted",
-            ExpressionAttributeNames: { "#target": toUserId },
-            ExpressionAttributeValues: { ":empty": {}, ":accepted": "ACCEPTED" }
-        }));
-        await ddb.send(new UpdateCommand({
-            TableName: TABLES.USERS,
-            Key: { email: toUserId },
-            UpdateExpression: "SET interactions = if_not_exists(interactions, :empty), interactions.#target = :accepted",
-            ExpressionAttributeNames: { "#target": fromEmail },
-            ExpressionAttributeValues: { ":empty": {}, ":accepted": "ACCEPTED" }
-        }));
-        await ddb.send(new PutCommand({
-            TableName: TABLES.LIKES,
-            Item: { fromUserId: fromEmail, toUserId, action: "ACCEPTED", timestamp: now, previousAction: "ACCEPT" }
-        }));
-        await ddb.send(new PutCommand({
-            TableName: TABLES.LIKES,
-            Item: { fromUserId: toUserId, toUserId: fromEmail, action: "ACCEPTED", timestamp: now, previousAction: reverseAction }
-        }));
-
-        const meAfterMatch = await ddb.send(new GetCommand({ TableName: TABLES.USERS, Key: { email: fromEmail } }));
-        return res.json({ success: true, matched: true, matchId, coins: Number(meAfterMatch.Item?.coins || 0) });
-    } catch (e) {
-        console.error("[ACCEPT FAIL]:", e.message);
-        res.status(500).json({ error: "Server technical error" });
-    }
-});
-
 app.post('/api/swipe/action', authenticateToken, async (req, res) => {
     const action = (req.body.action || "").toUpperCase();
     try {
         const fromEmail = req.user.email;
         const toUserId = (req.body.toUserId || "").trim().toLowerCase();
         if (!toUserId || toUserId === fromEmail) return res.status(400).json({ error: "Invalid target" });
-
-        if (action === "ACCEPT") {
-            req.body.toUserId = toUserId;
-            return res.redirect(307, '/api/swipe/accept');
-        }
 
         if (action === "LIKE" || action === "SUPERLIKE") {
             const reverse = await ddb.send(new GetCommand({ TableName: TABLES.LIKES, Key: { fromUserId: toUserId, toUserId: fromEmail } }));
@@ -194,17 +134,8 @@ app.post('/api/swipe/action', authenticateToken, async (req, res) => {
         }
 
         const cost = action === 'SUPERLIKE' ? 10 : (["REJECTED", "LIKE"].includes(action) ? 1 : 0);
-        let coinUpdate = { Attributes: { coins: 0 } };
-        if (cost > 0) {
-            coinUpdate = await ddb.send(new UpdateCommand({
-                TableName: TABLES.USERS,
-                Key: { email: fromEmail },
-                UpdateExpression: "SET coins = if_not_exists(coins, :start) - :cost",
-                ConditionExpression: "attribute_not_exists(coins) OR coins >= :cost",
-                ExpressionAttributeValues: { ":start": 25, ":cost": cost },
-                ReturnValues: "ALL_NEW"
-            }));
-        }
+        if (cost > 0) await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email: fromEmail }, UpdateExpression: "SET coins = if_not_exists(coins, :start)", ExpressionAttributeValues: { ":start": 25 } }));
+        const coinUpdate = await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email: fromEmail }, UpdateExpression: "SET coins = coins - :cost", ConditionExpression: "coins >= :cost", ExpressionAttributeValues: { ":cost": cost }, ReturnValues: "ALL_NEW" }));
 
         await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email: fromEmail }, UpdateExpression: "SET interactions = if_not_exists(interactions, :empty)", ExpressionAttributeValues: { ":empty": {} } }));
 
@@ -239,7 +170,7 @@ app.post('/api/swipe/action', authenticateToken, async (req, res) => {
         res.json({ success: true, matched: false, coins: coinUpdate.Attributes.coins });
     } catch (e) {
         console.error("[SWIPE FAIL]:", e.message);
-        if (e.name === "ConditionalCheckFailedException") return res.status(400).json({ error: NO_COINS_MESSAGE });
+        if (e.name === "ConditionalCheckFailedException") return res.status(400).json({ error: "Insufficient coins" });
         res.status(500).json({ error: "Server technical error" });
     }
 });
@@ -255,76 +186,80 @@ app.post('/api/referral/credit', authenticateToken, async (req, res) => {
     catch (e) { res.status(500).json({ error: e.message }); }
 });
 app.get('/api/swipe/leaderboard', async (req, res) => {
-    try { const result = await ddb.send(new ScanCommand({ TableName: TABLES.USERS })); const list = (result.Items || []).sort((a, b) => (b.coins || 0) - (a.coins || 0)).map((u, i) => ({ rank: i + 1, email: u.email, name: u.name, coins: u.coins || 0, photoUri: u.photoUri || u.photoUrl || "", badgeType: u.badgeType || "NONE" })); res.json({ leaderboard: list }); }
+    try { const result = await ddb.send(new ScanCommand({ TableName: TABLES.USERS, ProjectionExpression: "email, username, coins" })); res.json({ leaderboard: (result.Items || []).sort((a,b) => (b.coins || 0) - (a.coins || 0)) }); }
     catch (e) { res.status(500).json({ error: e.message }); }
 });
+
 app.post('/api/account/deactivate', authenticateToken, async (req, res) => {
-    try { await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email: req.user.email }, UpdateExpression: "SET isDeactivated = :v", ExpressionAttributeValues: { ":v": true } })); res.json({ success: true }); }
+    try { await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email: req.user.email }, UpdateExpression: "SET isDeactivated = :t", ExpressionAttributeValues: { ":t": true } })); res.json({ success: true }); }
     catch (e) { res.status(500).json({ error: e.message }); }
 });
 app.post('/api/account/delete-request', authenticateToken, async (req, res) => {
-    try {
-        const requestedAt = new Date();
-        const deleteAfter = new Date(requestedAt.getTime() + (30 * 24 * 60 * 60 * 1000));
-        const requestedAtIso = requestedAt.toISOString();
-        const deleteAfterIso = deleteAfter.toISOString();
-        await ddb.send(new PutCommand({
-            TableName: TABLES.DELETION,
-            Item: { email: req.user.email, requestedAt: requestedAtIso, deleteAfter: deleteAfterIso, status: "PENDING" }
-        }));
-        await ddb.send(new UpdateCommand({
-            TableName: TABLES.USERS,
-            Key: { email: req.user.email },
-            UpdateExpression: "SET deletionRequestedAt = :t",
-            ExpressionAttributeValues: { ":t": requestedAtIso }
-        }));
-        res.json({ success: true, requestedAt: requestedAtIso, deleteAfter: deleteAfterIso });
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    try { await ddb.send(new PutCommand({ TableName: TABLES.DELETION, Item: { email: req.user.email, requestedAt: Date.now(), status: "PENDING" } })); await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email: req.user.email }, UpdateExpression: "SET deletionRequestedAt = :t", ExpressionAttributeValues: { ":t": Date.now() } })); res.json({ success: true }); }
+    catch (e) { res.status(500).json({ error: e.message }); }
 });
 app.post('/api/report', authenticateToken, async (req, res) => {
-    try {
-        const targetEmail = String(req.body.targetEmail || "").trim().toLowerCase();
-        const reason = String(req.body.reason || "").trim();
-        if (!targetEmail) return res.status(400).json({ error: "Target email is required" });
-        if (targetEmail === req.user.email) return res.status(400).json({ error: "Invalid target" });
-        const report = { reportId: uuidv4(), reporter: req.user.email, target: targetEmail, reason, timestamp: Date.now() };
-        await ddb.send(new PutCommand({ TableName: TABLES.REPORTS, Item: report }));
-        res.json({ success: true, reportId: report.reportId });
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-// Compatibility endpoint for the Android report flow (saveReportSecure -> report/save).
-app.post('/report/save', authenticateToken, async (req, res) => {
-    try {
-        const targetEmail = String(req.body.targetEmail || "").trim().toLowerCase();
-        const reason = String(req.body.reason || "").trim();
-        if (!targetEmail) return res.status(400).json({ error: "Target email is required" });
-        if (targetEmail === req.user.email) return res.status(400).json({ error: "Invalid target" });
-        const report = { reportId: uuidv4(), reporter: req.user.email, target: targetEmail, reason, timestamp: Date.now() };
-        await ddb.send(new PutCommand({ TableName: TABLES.REPORTS, Item: report }));
-        res.json({ success: true, reportId: report.reportId });
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    try { await ddb.send(new PutCommand({ TableName: TABLES.REPORTS, Item: { reportId: uuidv4(), reporter: req.user.email, target: req.body.targetEmail, reason: req.body.reason, timestamp: Date.now() } })); res.json({ success: true }); }
+    catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.post('/profile/save', authenticateToken, async (req, res) => {
-    try {
-        const email = req.user.email;
-        const allowed = { ...req.body };
-        delete allowed.email; delete allowed.coins; delete allowed.password; delete allowed.userId; delete allowed.interactions; delete allowed.coinInitializedV2;
-        const names = {}, values = {}, sets = [];
-        Object.entries(allowed).forEach(([key, value], index) => { if (key === 'email' || value === undefined) return; const nk = `#p${index}`, vk = `:p${index}`; names[nk] = key; values[vk] = value; sets.push(`${nk} = ${vk}`); });
-        if (sets.length === 0) return res.json({ success: true });
-        await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email }, UpdateExpression: `SET ${sets.join(', ')}`, ExpressionAttributeNames: names, ExpressionAttributeValues: values }));
-        res.json({ success: true });
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    try { const data = { ...req.body, email: req.user.email }; await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email: req.user.email }, UpdateExpression: "SET #u = :u, age = :age, gender = :gender, country = :country, state = :state, photoUri = :photoUri, bio = :bio", ExpressionAttributeNames: { "#u": "username" }, ExpressionAttributeValues: { ":u": data.username, ":age": data.age, ":gender": data.gender, ":country": data.country, ":state": data.state, ":photoUri": data.photoUri, ":bio": data.bio } })); res.json({ success: true }); }
+    catch (e) { res.status(500).json({ error: e.message }); }
 });
-app.post('/image/upload', async (req, res) => {
-    try { const data = require('qs').stringify({ image: req.body.base64Image.split(',')[1] || req.body.base64Image }); const resp = await require('axios').post(`https://api.imgbb.com/1/upload?key=${IMGBB_KEY}`, data); res.json({ url: resp.data.data.url }); }
-    catch (e) { res.status(500).json({ error: "Upload fail" }); }
+
+app.get('/profile/me', authenticateToken, async (req, res) => {
+    try { const result = await ddb.send(new GetCommand({ TableName: TABLES.USERS, Key: { email: req.user.email } })); res.json({ user: result.Item }); }
+    catch (e) { res.status(500).json({ error: e.message }); }
 });
-async function startBot() {
-    try { const { state, saveCreds } = await useMultiFileAuthState(__dirname + '/auth_info'); const sock = makeWASocket({ auth: state, logger: pino({ level: 'silent' }), printQRInTerminal: false }); sock.ev.on('creds.update', saveCreds); sock.ev.on('connection.update', (u) => { if (u.connection === 'open') console.log('✅ Bot Alive!'); }); }
-    catch (e) { console.error("WA Bot Error:", e.message); }
-}
-startBot();
-masterServer.listen(4000, () => console.log('🚀 ULTIMATE SUBDIVIDED SERVER READY ON PORT 4000'));
+
+app.get('/profile/:email', authenticateToken, async (req, res) => {
+    try { const result = await ddb.send(new GetCommand({ TableName: TABLES.USERS, Key: { email: req.params.email.trim().toLowerCase() } })); res.json({ user: result.Item }); }
+    catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/matches', authenticateToken, async (req, res) => {
+    try { const result = await ddb.send(new ScanCommand({ TableName: TABLES.MATCHES, FilterExpression: "contains(#u, :me)", ExpressionAttributeNames: { "#u": "users" }, ExpressionAttributeValues: { ":me": req.user.email } })); res.json({ matches: result.Items || [] }); }
+    catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/chat/:matchId', authenticateToken, async (req, res) => {
+    try { const result = await ddb.send(new QueryCommand({ TableName: "Messages", KeyConditionExpression: "matchId = :m", ExpressionAttributeValues: { ":m": req.params.matchId } })); res.json({ messages: result.Items || [] }); }
+    catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/chat/send', authenticateToken, async (req, res) => {
+    try { const item = { matchId: req.body.matchId, messageId: uuidv4(), sender: req.user.email, text: req.body.text || "", imageUrl: req.body.imageUrl || "", timestamp: Date.now() }; await ddb.send(new PutCommand({ TableName: "Messages", Item: item })); res.json({ success: true, message: item }); }
+    catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/notifications', authenticateToken, async (req, res) => {
+    try { const result = await ddb.send(new QueryCommand({ TableName: "Notifications", KeyConditionExpression: "userEmail = :e", ExpressionAttributeValues: { ":e": req.user.email } })); res.json({ notifications: result.Items || [] }); }
+    catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/notifications/read', authenticateToken, async (req, res) => {
+    try { await ddb.send(new UpdateCommand({ TableName: "Notifications", Key: { userEmail: req.user.email, notificationId: req.body.notificationId }, UpdateExpression: "SET #r = :t", ExpressionAttributeNames: { "#r": "read" }, ExpressionAttributeValues: { ":t": true } })); res.json({ success: true }); }
+    catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/account/logout', authenticateToken, async (req, res) => {
+    res.json({ success: true });
+});
+
+app.get('/health', (req, res) => res.json({ ok: true }));
+
+io.on('connection', (socket) => {
+    socket.on('join', (email) => socket.join(String(email || '').toLowerCase()));
+    socket.on('send_message', async (data) => {
+        try {
+            const item = { matchId: data.matchId, messageId: uuidv4(), sender: String(data.sender || '').toLowerCase(), text: data.text || '', imageUrl: data.imageUrl || '', timestamp: Date.now() };
+            await ddb.send(new PutCommand({ TableName: "Messages", Item: item }));
+            io.to(String(data.receiver || '').toLowerCase()).emit('new_message', item);
+            io.to(String(data.sender || '').toLowerCase()).emit('new_message', item);
+        } catch (e) { console.error('socket send_message error:', e.message); }
+    });
+});
+
+const PORT = process.env.PORT || 4000;
+masterServer.listen(PORT, '0.0.0.0', () => console.log(`Tinklet API running on port ${PORT}`));
