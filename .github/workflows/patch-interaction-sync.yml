@@ -1,0 +1,119 @@
+name: Patch interaction sync direction
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Patch only DiscoveryViewModel sync logic
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('DiscoveryViewModel.kt')
+          s = p.read_text()
+
+          old = '''                            // Sync my sent actions. LIKE is normalized to LIKED for the local UI.
+                            data.sent.forEach { record ->
+                                val targetEmail = record.toUserId.trim().lowercase()
+                                val local = profileDao.getProfileByEmail(targetEmail)
+                                val status = when (record.action.uppercase()) {
+                                    "LIKE" -> "LIKED"
+                                    "SUPERLIKE" -> "SUPERLIKE_SENT"
+                                    else -> record.action.uppercase()
+                                }
+                                if (local == null) {
+                                    val pRes = try { RetrofitClient.apiService.getProfileSecure(targetEmail) } catch(e: Exception) { null }
+                                    if (pRes?.isSuccessful == true && pRes.body() != null) {
+                                        profileDao.insertProfiles(listOf(pRes.body()!!.copy(connectionStatus = status, isMe = false)))
+                                    }
+                                } else if (local.connectionStatus != status) {
+                                    profileDao.insertProfiles(listOf(local.copy(connectionStatus = status, isMe = false)))
+                                }
+                            }
+
+                            // IMPORTANT: always update existing local profiles too.
+                            // Previously incoming requests were inserted only when local == null,
+                            // so a profile already viewed in Discovery never appeared in Inbox.
+                            data.incoming.forEach { record ->
+                                val fromEmail = record.fromUserId.trim().lowercase()
+                                val local = profileDao.getProfileByEmail(fromEmail)
+                                val status = if (record.action.uppercase() == "SUPERLIKE") "SUPERLIKE" else "PENDING"
+                                if (local == null) {
+                                    val pRes = try { RetrofitClient.apiService.getProfileSecure(fromEmail) } catch(e: Exception) { null }
+                                    if (pRes?.isSuccessful == true && pRes.body() != null) {
+                                        profileDao.insertProfiles(listOf(pRes.body()!!.copy(connectionStatus = status, isMe = false)))
+                                    }
+                                } else if (!local.isMe) {
+                                    profileDao.insertProfiles(listOf(local.copy(connectionStatus = status, isMe = false)))
+                                }
+                            }
+'''
+
+          new = '''                            // Sync my sent actions first. Sent state has priority because Room stores
+                            // one connectionStatus per profile; an incoming record must never overwrite
+                            // an action I sent to the same person.
+                            val sentTargets = mutableSetOf<String>()
+                            data.sent.forEach { record ->
+                                val targetEmail = record.toUserId.trim().lowercase()
+                                sentTargets.add(targetEmail)
+                                val local = profileDao.getProfileByEmail(targetEmail)
+                                val status = when (record.action.uppercase()) {
+                                    "LIKE" -> "LIKED"
+                                    "SUPERLIKE" -> "SUPERLIKE_SENT"
+                                    "REJECTED" -> "REJECTED"
+                                    "REJECTED_BY_RECEIVER" -> "OTHER_REJECTED_ME"
+                                    else -> record.action.uppercase()
+                                }
+                                if (local == null) {
+                                    val pRes = try { RetrofitClient.apiService.getProfileSecure(targetEmail) } catch(e: Exception) { null }
+                                    if (pRes?.isSuccessful == true && pRes.body() != null) {
+                                        profileDao.insertProfiles(listOf(pRes.body()!!.copy(connectionStatus = status, isMe = false)))
+                                    }
+                                } else if (!local.isMe && local.connectionStatus != status) {
+                                    profileDao.insertProfiles(listOf(local.copy(connectionStatus = status, isMe = false)))
+                                }
+                            }
+
+                            // Incoming requests are directional. Never let an incoming record overwrite
+                            // a profile that is already represented by one of my sent actions.
+                            data.incoming.forEach { record ->
+                                val fromEmail = record.fromUserId.trim().lowercase()
+                                if (sentTargets.contains(fromEmail)) return@forEach
+
+                                val local = profileDao.getProfileByEmail(fromEmail)
+                                val status = if (record.action.uppercase() == "SUPERLIKE") "SUPERLIKE" else "PENDING"
+                                if (local == null) {
+                                    val pRes = try { RetrofitClient.apiService.getProfileSecure(fromEmail) } catch(e: Exception) { null }
+                                    if (pRes?.isSuccessful == true && pRes.body() != null) {
+                                        profileDao.insertProfiles(listOf(pRes.body()!!.copy(connectionStatus = status, isMe = false)))
+                                    }
+                                } else if (!local.isMe) {
+                                    profileDao.insertProfiles(listOf(local.copy(connectionStatus = status, isMe = false)))
+                                }
+                            }
+'''
+
+          if old not in s:
+              raise SystemExit('Expected interaction sync block not found; refusing to change anything.')
+
+          p.write_text(s.replace(old, new, 1))
+          PY
+
+      - name: Commit fix and remove temporary workflow
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/patch-interaction-sync.yml
+          git add DiscoveryViewModel.kt
+          git diff --cached --quiet && exit 0
+          git commit -m "Fix sent and received interaction direction"
+          git push
