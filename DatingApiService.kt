@@ -75,6 +75,9 @@ interface DatingApiService {
     @POST("api/swipe/action")
     suspend fun swipeAction(@Body request: SwipeActionRequest): Response<SwipeActionResponse>
 
+    @POST("api/coins/reward")
+    suspend fun rewardCoins(): Response<CoinResponse>
+
     @GET("api/swipe/matches")
     suspend fun getMatches(): Response<MatchesResponse>
 
@@ -94,6 +97,12 @@ data class SwipeActionRecord(
     val toUserId: String,
     val action: String,
     val timestamp: Long
+)
+
+data class CoinResponse(
+    val success: Boolean = false,
+    val coins: Int? = null,
+    val error: String? = null
 )
 
 data class SignupRequest(
