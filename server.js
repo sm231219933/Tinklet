@@ -118,11 +118,27 @@ app.get('/api/sync/all', authenticateToken, async (req, res) => {
             const incomingGsi = await ddb.send(new QueryCommand({ TableName: TABLES.LIKES, IndexName: "toUserId-index", KeyConditionExpression: "toUserId = :me", ExpressionAttributeValues: { ":me": email } }));
             incomingItems = incomingGsi.Items || [];
         } catch (e) { console.error("[SYNC] Incoming GSI query failed:", e.message); }
+        01
         const allLikes = await ddb.send(new ScanCommand({ TableName: TABLES.LIKES }));
-        const scannedIncoming = (allLikes.Items || []).filter(l => String(l.toUserId || "").trim().toLowerCase() === email);
-        const incomingMap = new Map();
-        [...incomingItems, ...scannedIncoming].forEach(l => incomingMap.set(`${String(l.fromUserId || "").toLowerCase()}::${String(l.toUserId || "").toLowerCase()}`, l));
-        const incoming = [...incomingMap.values()].filter(l => ["LIKE", "SUPERLIKE"].includes(String(l.action || "").toUpperCase()));
+const myProfileRes = await ddb.send(new GetCommand({ TableName: TABLES.USERS, Key: { email } }));
+const myInteractions = myProfileRes.Item?.interactions || {};
+
+const scannedIncoming = (allLikes.Items || []).filter(l => String(l.toUserId || "").trim().toLowerCase() === email);
+const incomingMap = new Map();
+[...incomingItems, ...scannedIncoming].forEach(l => incomingMap.set(`${String(l.fromUserId || "").toLowerCase()}::${String(l.toUserId || "").toLowerCase()}`, l));
+
+// Sirf wahi incoming requests filter karo jo abhi tak ACCEPT ya REJECT nahi hui hain
+const incoming = [...incomingMap.values()].filter(l => {
+    const actionUpper = String(l.action || "").toUpperCase();
+    const partnerEmail = String(l.fromUserId || "").trim().toLowerCase();
+    const myInteractionWithPartner = String(myInteractions[partnerEmail] || "").toUpperCase();
+    
+    return ["LIKE", "SUPERLIKE"].includes(actionUpper) && 
+           myInteractionWithPartner !== "ACCEPTED" && 
+           myInteractionWithPartner !== "REJECTED";
+});
+        
+        01
 
         const matches = await ddb.send(new ScanCommand({ TableName: TABLES.MATCHES, FilterExpression: "contains(#u, :me)", ExpressionAttributeNames: { "#u": "users" }, ExpressionAttributeValues: { ":me": email } }));
         res.json({
