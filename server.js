@@ -118,7 +118,7 @@ app.get('/api/sync/all', authenticateToken, async (req, res) => {
             const incomingGsi = await ddb.send(new QueryCommand({ TableName: TABLES.LIKES, IndexName: "toUserId-index", KeyConditionExpression: "toUserId = :me", ExpressionAttributeValues: { ":me": email } }));
             incomingItems = incomingGsi.Items || [];
         } catch (e) { console.error("[SYNC] Incoming GSI query failed:", e.message); }
-        01
+       // 01
         const allLikes = await ddb.send(new ScanCommand({ TableName: TABLES.LIKES }));
 const myProfileRes = await ddb.send(new GetCommand({ TableName: TABLES.USERS, Key: { email } }));
 const myInteractions = myProfileRes.Item?.interactions || {};
@@ -138,7 +138,7 @@ const incoming = [...incomingMap.values()].filter(l => {
            myInteractionWithPartner !== "REJECTED";
 });
         
-        01
+      //  01
 
         const matches = await ddb.send(new ScanCommand({ TableName: TABLES.MATCHES, FilterExpression: "contains(#u, :me)", ExpressionAttributeNames: { "#u": "users" }, ExpressionAttributeValues: { ":me": email } }));
         res.json({
@@ -229,7 +229,7 @@ app.post('/api/swipe/action', authenticateToken, async (req, res) => {
                 coins: Number(meAfterAccept.Item?.coins || 0)
             });
         }
-01
+//01
         // LIKE / SUPERLIKE: if the other user already liked us, create a match immediately.
        // LIKE / SUPERLIKE: if the other user already liked us, create a match immediately.
 if (action === "LIKE" || action === "SUPERLIKE") {
@@ -273,7 +273,7 @@ if (action === "LIKE" || action === "SUPERLIKE") {
         });
     }
 }
-        01
+      //  01
 
         // LIKE = 1, SUPERLIKE = 10, REJECTED = 1. ACCEPT = 0 (handled above).
         const cost = action === "SUPERLIKE" ? 10 : (["REJECTED", "LIKE"].includes(action) ? 1 : 0);
@@ -317,7 +317,7 @@ if (action === "LIKE" || action === "SUPERLIKE") {
             await ddb.send(new DeleteCommand({ TableName: TABLES.LIKES, Key: { fromUserId: fromEmail, toUserId } }));
             return res.json({ success: true, matched: false, coins: coinUpdate.Attributes.coins });
         }
-01
+//01
        if (action === "REJECTED") {
     // Sirf humare interactions me targets ko REJECTED mark karo
     await setInteractionStatus(fromEmail, toUserId, "REJECTED");
@@ -329,7 +329,7 @@ if (action === "LIKE" || action === "SUPERLIKE") {
     }));
     
     return res.json({ success: true, matched: false, coins: coinUpdate.Attributes.coins });
-}  01
+} // 01
 
         await setInteractionStatus(fromEmail, toUserId, action);
         await ddb.send(new PutCommand({ TableName: TABLES.LIKES, Item: { fromUserId: fromEmail, toUserId, action, timestamp: Date.now() } }));
