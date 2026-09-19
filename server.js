@@ -189,11 +189,12 @@ const incomingSuperlikes = [...incomingMap.values()].filter(l => {
     user: profileMap[email],
 
     sent: sent.map(l => ({
-        fromUserId: l.fromUserId,
-        toUserId: l.toUserId,
-        action: l.action,
-        timestamp: l.timestamp || 0
-    })),
+    fromUserId: l.fromUserId,
+    toUserId: l.toUserId,
+    action: l.action,
+    timestamp: l.timestamp || 0,
+    profile: profileMap[String(l.toUserId || "").trim().toLowerCase()] || null
+})),
 
    incomingLikes: incomingLikes.map(l => ({
     fromUserId: l.fromUserId,
