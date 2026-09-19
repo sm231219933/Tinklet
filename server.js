@@ -148,20 +148,26 @@ const incomingMap = new Map();
 // Sirf wahi incoming requests filter karo jo abhi tak ACCEPT ya REJECT nahi hui hain ----- 01
 const incomingLikes = [...incomingMap.values()].filter(l => {
     const actionUpper = String(l.action || "").trim().toUpperCase();
-    const partnerEmail = String(l.fromUserId || "").trim().toLowerCase();
-    const myInteractionWithPartner = String(myInteractions[partnerEmail] || "").trim().toUpperCase();
+    const fromEmail = String(l.fromUserId || "").trim().toLowerCase();
+    const toEmail = String(l.toUserId || "").trim().toLowerCase();
+    const myInteractionWithPartner = String(myInteractions[fromEmail] || "").trim().toUpperCase();
 
-    return actionUpper === "LIKE" &&
+    return fromEmail !== email &&
+           toEmail === email &&
+           actionUpper === "LIKE" &&
            myInteractionWithPartner !== "ACCEPTED" &&
            myInteractionWithPartner !== "REJECTED";
 });
 
 const incomingSuperlikes = [...incomingMap.values()].filter(l => {
     const actionUpper = String(l.action || "").trim().toUpperCase();
-    const partnerEmail = String(l.fromUserId || "").trim().toLowerCase();
-    const myInteractionWithPartner = String(myInteractions[partnerEmail] || "").trim().toUpperCase();
+    const fromEmail = String(l.fromUserId || "").trim().toLowerCase();
+    const toEmail = String(l.toUserId || "").trim().toLowerCase();
+    const myInteractionWithPartner = String(myInteractions[fromEmail] || "").trim().toUpperCase();
 
-    return actionUpper === "SUPERLIKE" &&
+    return fromEmail !== email &&
+           toEmail === email &&
+           actionUpper === "SUPERLIKE" &&
            myInteractionWithPartner !== "ACCEPTED" &&
            myInteractionWithPartner !== "REJECTED";
 });
