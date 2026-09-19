@@ -213,62 +213,51 @@ app.post('/api/swipe/action', authenticateToken, async (req, res) => {
                 coins: Number(meAfterAccept.Item?.coins || 0)
             });
         }
-
+01
         // LIKE / SUPERLIKE: if the other user already liked us, create a match immediately.
-        if (action === "LIKE" || action === "SUPERLIKE") {
-            const reverse = await ddb.send(new GetCommand({
-                TableName: TABLES.LIKES,
-                Key: { fromUserId: toUserId, toUserId: fromEmail }
-            }));
-            const reverseAction = String(reverse.Item?.action || "").toUpperCase();
+       // LIKE / SUPERLIKE: if the other user already liked us, create a match immediately.
+if (action === "LIKE" || action === "SUPERLIKE") {
+    const reverse = await ddb.send(new GetCommand({
+        TableName: TABLES.LIKES,
+        Key: { fromUserId: toUserId, toUserId: fromEmail }
+    }));
+    const reverseAction = String(reverse.Item?.action || "").toUpperCase();
 
-            if (["LIKE", "SUPERLIKE"].includes(reverseAction)) {
-                const matchId = createMatchId(fromEmail, toUserId);
-                const now = Date.now();
+    if (["LIKE", "SUPERLIKE"].includes(reverseAction)) {
+        const matchId = createMatchId(fromEmail, toUserId);
+        const now = Date.now();
 
-                await ddb.send(new PutCommand({
-                    TableName: TABLES.MATCHES,
-                    Item: { matchId, users: [fromEmail, toUserId], timestamp: now }
-                }));
+        // 1. Matches Table me entry create karo
+        await ddb.send(new PutCommand({
+            TableName: TABLES.MATCHES,
+            Item: { matchId, users: [fromEmail, toUserId], timestamp: now }
+        }));
 
-                await setInteractionStatus(fromEmail, toUserId, "ACCEPTED");
-                await setInteractionStatus(toUserId, fromEmail, "ACCEPTED");
+        // 2. Dono users ki profile ke interactions ko strictly MATCHED/ACCEPTED karo
+        await setInteractionStatus(fromEmail, toUserId, "ACCEPTED");
+        await setInteractionStatus(toUserId, fromEmail, "ACCEPTED");
 
-                await ddb.send(new PutCommand({
-                    TableName: TABLES.LIKES,
-                    Item: {
-                        fromUserId: fromEmail,
-                        toUserId,
-                        action: "ACCEPTED",
-                        timestamp: now,
-                        previousAction: action
-                    }
-                }));
+        // 3. Likes Table me dono side ki entry ACCEPTED karo
+        await ddb.send(new PutCommand({
+            TableName: TABLES.LIKES,
+            Item: { fromUserId: fromEmail, toUserId, action: "ACCEPTED", timestamp: now, previousAction: action }
+        }));
 
-                await ddb.send(new PutCommand({
-                    TableName: TABLES.LIKES,
-                    Item: {
-                        fromUserId: toUserId,
-                        toUserId: fromEmail,
-                        action: "ACCEPTED",
-                        timestamp: now,
-                        previousAction: reverseAction
-                    }
-                }));
+        await ddb.send(new PutCommand({
+            TableName: TABLES.LIKES,
+            Item: { fromUserId: toUserId, toUserId: fromEmail, action: "ACCEPTED", timestamp: now, previousAction: reverseAction }
+        }));
 
-                const meAfterMatch = await ddb.send(new GetCommand({
-                    TableName: TABLES.USERS,
-                    Key: { email: fromEmail }
-                }));
-
-                return res.json({
-                    success: true,
-                    matched: true,
-                    matchId,
-                    coins: Number(meAfterMatch.Item?.coins || 0)
-                });
-            }
-        }
+        const meAfterMatch = await ddb.send(new GetCommand({ TableName: TABLES.USERS, Key: { email: fromEmail } }));
+        return res.json({
+            success: true,
+            matched: true,
+            matchId,
+            coins: Number(meAfterMatch.Item?.coins || 0)
+        });
+    }
+}
+        01
 
         // LIKE = 1, SUPERLIKE = 10, REJECTED = 1. ACCEPT = 0 (handled above).
         const cost = action === "SUPERLIKE" ? 10 : (["REJECTED", "LIKE"].includes(action) ? 1 : 0);
