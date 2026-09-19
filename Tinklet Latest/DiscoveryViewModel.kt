@@ -525,30 +525,37 @@ class DiscoveryViewModel(private val app: Application) : AndroidViewModel(app) {
                                 // SERVER SYNC:
                                 // Incoming response ke andar server already actual profile bhej raha hai.
                                 // Isi profile ko use karo — dobara profile fetch karke old/default name mat lao.
-                                var localProfile: UserProfile? = null
+                                // SERVER SYNC:
+// /api/sync/all already sends the sender's COMPLETE real profile.
+// Always use record.profile first.
+                                var localProfile: UserProfile? = record.profile
 
-                                try {
-                                    val remoteRes =
-                                        RetrofitClient.apiService.getProfileSecure(
-                                            email = targetEmail
-                                        )
-
-                                    if (
-                                        remoteRes.isSuccessful &&
-                                        remoteRes.body() != null
-                                    ) {
-                                        localProfile = remoteRes.body()
-                                    }
-                                } catch (e: Exception) {
-                                    Log.e(
-                                        "CloudSync",
-                                        "Failed to fetch incoming profile: $targetEmail",
-                                        e
-                                    )
-                                }
-
+// Fallback only if server did not provide the profile.
                                 if (localProfile == null) {
                                     localProfile = profileDao.getProfileByEmail(targetEmail)
+                                }
+
+// Final fallback: fetch directly from the public profile endpoint.
+                                if (localProfile == null) {
+                                    try {
+                                        val remoteRes =
+                                            RetrofitClient.apiService.getProfilePublic(
+                                                email = targetEmail
+                                            )
+
+                                        if (
+                                            remoteRes.isSuccessful &&
+                                            remoteRes.body() != null
+                                        ) {
+                                            localProfile = remoteRes.body()
+                                        }
+                                    } catch (e: Exception) {
+                                        Log.e(
+                                            "CloudSync",
+                                            "Failed to fetch incoming profile: $targetEmail",
+                                            e
+                                        )
+                                    }
                                 }
 
                                 val profile = localProfile
