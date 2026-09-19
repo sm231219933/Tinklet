@@ -20,6 +20,7 @@ import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import com.google.firebase.auth.FirebaseAuth
 import com.google.gson.Gson
+import kotlin.math.min
 import java.util.*
 
 data class RegistrationData(
@@ -32,10 +33,12 @@ data class RegistrationData(
     val country: String = "",
     val state: String = "",
     val referredBy: String = ""
+
 )
 
 class DiscoveryViewModel(private val app: Application) : AndroidViewModel(app) {
     private val db = AppDatabase.getDatabase(app)
+
     private val profileDao = db.profileDao()
     private val chatMessageDao = db.chatMessageDao()
     private val preferenceManager = PreferenceManager(app)
@@ -107,43 +110,26 @@ class DiscoveryViewModel(private val app: Application) : AndroidViewModel(app) {
         }
     }
     // 1. DISCOVERY FLOW (BACKUP STYLE FILTERING)
-   private val _remoteProfiles = MutableStateFlow<List<UserProfile>>(emptyList())
+    val profiles: StateFlow<List<UserProfile>> = combine(
+        profileDao.getAllProfilesFlow(),
+        _remoteProfiles,
+        _currentUser
+    ) { local, remote, me ->
+        val meEmail = (me?.email ?: "").lowercase().trim()
+        
+        // Un logon ki list jo local DB mein swiped hain
+        val swipedEmails = local.filter { 
+            it.connectionStatus != "NONE" && it.connectionStatus != "VIEWED" 
+        }.map { it.email.lowercase().trim() }.toSet()
 
-val profiles: StateFlow<List<UserProfile>> = combine(
-    _remoteProfiles,
-    _currentUser
-) { remote, me ->
-
-    val myEmail = me?.email
-        ?.trim()
-        ?.lowercase()
-        ?: ""
-
-    remote
-        .filter {
-            it.email.trim().lowercase() != myEmail
+        // Filter: Remote mein se khud ko aur swiped logon ko hatao
+        val combined = remote.filter { 
+            val email = it.email.lowercase().trim()
+            email != meEmail && !swipedEmails.contains(email) 
         }
-        .distinctBy {
-            it.email.trim().lowercase()
-        }
-        .sortedWith(
-            compareByDescending<UserProfile> {
-                when (it.badgeType) {
-                    "GOLDEN" -> 3
-                    "SILVER" -> 2
-                    "BRONZE" -> 1
-                    else -> 0
-                }
-            }.thenByDescending {
-                it.lastActive
-            }
-        )
-
-}.stateIn(
-    viewModelScope,
-    SharingStarted.WhileSubscribed(5000),
-    emptyList()
-)
+        
+        combined.distinctBy { it.email }.sortedByDescending { it.lastActive }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
     // DEBUG VERSION: Showing remote profiles directly to find the bug
 
 
@@ -186,29 +172,61 @@ val profiles: StateFlow<List<UserProfile>> = combine(
     val matches: StateFlow<List<UserProfile>> = profileDao.getMatches().stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
     
     // STRICT STATUS SYNC (LIKE, REJECTED, SUPERLIKE, PENDING, ACCEPTED)
-    val sentRequests: StateFlow<List<UserProfile>> = profileDao.getAllProfilesFlow().map { list ->
-        list.filter { it.connectionStatus == "LIKE" && !it.isMe }
-    }.stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+    val sentRequests: StateFlow<List<UserProfile>> =
+        profileDao.getAllProfilesFlow().map { list ->
+            list.filter {
+                (it.connectionStatus == "LIKED" ||
+                        it.connectionStatus == "LIKE") &&
+                        !it.isMe
+            }
+        }.stateIn(
+            viewModelScope,
+            SharingStarted.Lazily,
+            emptyList()
+        )
 
     val rejectedProfiles: StateFlow<List<UserProfile>> = profileDao.getAllProfilesFlow().map { list ->
         list.filter { it.connectionStatus == "REJECTED" && !it.isMe }
     }.stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
-    val superLikedProfiles: StateFlow<List<UserProfile>> = profileDao.getAllProfilesFlow().map { list ->
-        list.filter { it.connectionStatus == "SUPERLIKE" && !it.isMe } 
-    }.stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+    val superLikedProfiles: StateFlow<List<UserProfile>> =
+        profileDao.getAllProfilesFlow().map { list ->
+            list.filter {
+                it.connectionStatus == "SUPERLIKE_SENT" && !it.isMe
+            }
+        }.stateIn(
+            viewModelScope,
+            SharingStarted.WhileSubscribed(5000),
+            emptyList()
+        )
 
-    val incomingRequests: StateFlow<List<UserProfile>> = profileDao.getAllProfilesFlow().map { list ->
-        list.filter { it.connectionStatus == "PENDING" && !it.isMe }
-    }.stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+    val incomingRequests: StateFlow<List<UserProfile>> =
+        profileDao.getAllProfilesFlow().map { list ->
+            list.filter {
+                (it.connectionStatus == "PENDING" ||
+                        it.connectionStatus == "SUPERLIKE_RECEIVED") &&
+                        !it.isMe
+            }
+        }.stateIn(
+            viewModelScope,
+            SharingStarted.WhileSubscribed(5000),
+            emptyList()
+        )
 
     // Keep existing 3x3 Inbox flows for RequestsScreen compatibility
-    val incomingSuperlikes: StateFlow<List<UserProfile>> = incomingRequests.map { list ->
-        list.filter { it.connectionStatus == "SUPERLIKE" }
-    }.stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+    val incomingSuperlikes: StateFlow<List<UserProfile>> =
+        incomingRequests.map { list ->
+            list.filter {
+                it.connectionStatus == "SUPERLIKE_RECEIVED"
+            }
+        }.stateIn(
+            viewModelScope,
+            SharingStarted.WhileSubscribed(5000),
+            emptyList()
+        )
 
     val incomingNormalLikes: StateFlow<List<UserProfile>> = incomingRequests.map { list ->
-        list.filter { it.connectionStatus != "SUPERLIKE" }
+        list.filter { it.connectionStatus != "SUPERLIKE_RECEIVED" }
     }.stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
     val incomingRejected: StateFlow<List<UserProfile>> = profileDao.getAllProfilesFlow().map { list ->
@@ -364,33 +382,278 @@ val profiles: StateFlow<List<UserProfile>> = combine(
     }
 
     // 3. BACKEND SYNC LOOP (MIRRORING SERVER DATA)
+    // 3. BACKEND SYNC LOOP (MIRRORING SERVER DATA)
     private fun startBackendSyncLoop() {
         viewModelScope.launch {
             while (true) {
                 try {
-                    val myId = _currentUser.value?.email ?: ""
+                    val myId = _currentUser.value?.email
+                        ?.trim()
+                        ?.lowercase()
+                        ?: ""
+
                     if (myId.isNotBlank()) {
-                        if (signaling == null) initSignaling(myId)
-                        
+
+                        if (signaling == null) {
+                            initSignaling(myId)
+                        }
+
                         refreshFeed()
 
-                        // DEEP CLOUD SYNC: Mirror Sent, Incoming, and Matches
+                        // DEEP CLOUD SYNC
                         val syncRes = RetrofitClient.apiService.syncAll()
-                        if (syncRes.isSuccessful && syncRes.body() != null) {
-                            val data = syncRes.body()!!
-                            Log.d("CloudSync", "Syncing lists: Sent=${data.sent.size}, Received=${data.incoming.size}")
 
-                            if (data.sent.isNotEmpty()) profileDao.insertProfiles(data.sent)
-                            if (data.incoming.isNotEmpty()) profileDao.insertProfiles(data.incoming)
-                            if (data.matches.isNotEmpty()) profileDao.insertProfiles(data.matches)
+                        if (syncRes.isSuccessful && syncRes.body() != null) {
+
+                            val data = syncRes.body()!!
+                            data.user?.let { serverUser ->
+                                val current = _currentUser.value
+
+                                if (current != null && serverUser.coins != null) {
+                                    val updated = current.copy(
+                                        coins = serverUser.coins
+                                    )
+
+                                    _currentUser.value = updated
+                                    profileDao.updateProfile(updated)
+                                    preferenceManager.saveProfileCache(
+                                        Gson().toJson(updated)
+                                    )
+                                }
+                            }
+
+                            Log.d(
+                                "CloudSync",
+                                "Syncing lists: Sent=${data.sent.size}, Likes=${data.incomingLikes.size}, Super=${data.incomingSuperlikes.size}, Matches=${data.matches.size}"
+                            )
+
+                            // ==========================================
+                            // SENT ACTIONS
+                            // ==========================================
+                            data.sent.forEach { record ->
+
+                                val targetEmail = record.toUserId
+                                    .trim()
+                                    .lowercase()
+
+                                // Server /api/sync/all already sends the sender's real profile.
+// Use that profile first so the actual name is preserved.
+                                var localProfile: UserProfile? = profileDao.getProfileByEmail(targetEmail)
+
+// Fallback only if server did not include the profile.
+                                if (localProfile == null) {
+                                    try {
+                                        val remoteRes =
+                                            RetrofitClient.apiService.getProfileSecure(
+                                                email = targetEmail
+                                            )
+
+                                        if (
+                                            remoteRes.isSuccessful &&
+                                            remoteRes.body() != null
+                                        ) {
+                                            localProfile = remoteRes.body()
+                                        }
+                                    } catch (e: Exception) {
+                                        Log.e(
+                                            "CloudSync",
+                                            "Failed to fetch incoming profile: $targetEmail",
+                                            e
+                                        )
+                                    }
+                                }
+
+// Final local DB fallback.
+                                if (localProfile == null) {
+                                    localProfile = profileDao.getProfileByEmail(targetEmail)
+                                }
+
+                                val profile = localProfile
+
+                                if (profile != null && !profile.isMe) {
+                                      //01
+                                    val status = when (record.action.trim().uppercase()) {
+                                        "LIKE" -> "LIKED"
+                                        "LIKE_SENT" -> "LIKED"
+
+                                        "SUPERLIKE" -> "SUPERLIKE_SENT"
+                                        "SUPERLIKE_SENT" -> "SUPERLIKE_SENT"
+
+                                        "REJECTED" -> "REJECTED"
+                                        "REJECTED_SENT" -> "REJECTED"
+
+                                        "ACCEPTED" -> "ACCEPTED"
+
+                                        else -> record.action.trim().uppercase()
+                                    }
+                                //01
+                                    profileDao.insertProfiles(
+                                        listOf(
+                                            profile.copy(
+                                                email = targetEmail,
+                                                connectionStatus = status,
+                                                isMe = false
+                                            )
+                                        )
+                                    )
+                                }
+                            }
+
+                            // ==========================================
+                            // INCOMING ACTIONS
+                            // ==========================================
+                            // ==========================================
+// INCOMING ACTIONS
+// LIKE + SUPERLIKE + REJECTED
+// ==========================================
+
+                            val incomingRecords =
+                                data.incomingLikes +
+                                        data.incomingSuperlikes +
+                                        data.incomingRejected
+
+                            incomingRecords.forEach { record ->
+
+                                val targetEmail = record.fromUserId
+                                    .trim()
+                                    .lowercase()
+
+                                if (targetEmail.isBlank() || targetEmail == myId) {
+                                    return@forEach
+                                }
+
+                                // SERVER SYNC:
+                                // Incoming response ke andar server already actual profile bhej raha hai.
+                                // Isi profile ko use karo — dobara profile fetch karke old/default name mat lao.
+                                var localProfile: UserProfile? = null
+
+                                try {
+                                    val remoteRes =
+                                        RetrofitClient.apiService.getProfileSecure(
+                                            email = targetEmail
+                                        )
+
+                                    if (
+                                        remoteRes.isSuccessful &&
+                                        remoteRes.body() != null
+                                    ) {
+                                        localProfile = remoteRes.body()
+                                    }
+                                } catch (e: Exception) {
+                                    Log.e(
+                                        "CloudSync",
+                                        "Failed to fetch incoming profile: $targetEmail",
+                                        e
+                                    )
+                                }
+
+                                if (localProfile == null) {
+                                    localProfile = profileDao.getProfileByEmail(targetEmail)
+                                }
+
+                                val profile = localProfile
+
+                                if (profile != null && !profile.isMe) {
+
+                                    val status = when (
+                                        record.action.trim().uppercase()
+                                    ) {
+                                        "LIKE" -> "PENDING"
+                                        "SUPERLIKE" -> "SUPERLIKE_RECEIVED"
+                                        "REJECTED" -> "OTHER_REJECTED_ME"
+                                        "ACCEPTED" -> "ACCEPTED"
+                                        else -> record.action.trim().uppercase()
+                                    }
+
+                                    profileDao.insertProfiles(
+                                        listOf(
+                                            profile.copy(
+                                                email = targetEmail,
+                                                connectionStatus = status,
+                                                isMe = false
+                                            )
+                                        )
+                                    )
+
+                                    Log.d(
+                                        "CloudSync",
+                                        "RECEIVED PROFILE: email=$targetEmail, name=${profile.name}, age=${profile.age}, action=${record.action}"
+                                    )
+                                }
+                            }
+                                //01
+                            // ==========================================
+                            // MATCHES
+                            // ==========================================
+                            data.matches.forEach { match ->
+
+                                val users = match["users"] as? List<*>
+
+                                val partnerEmail = users
+                                    ?.mapNotNull { it as? String }
+                                    ?.map { it.trim().lowercase() }
+                                    ?.firstOrNull { it != myId }
+
+                                if (!partnerEmail.isNullOrBlank()) {
+
+                                    var partnerProfile =
+                                        profileDao.getProfileByEmail(partnerEmail)
+
+                                    if (partnerProfile == null) {
+                                        try {
+                                            val remoteRes =
+                                                RetrofitClient.apiService.getProfileSecure(
+                                                    email = partnerEmail
+                                                )
+
+                                            if (
+                                                remoteRes.isSuccessful &&
+                                                remoteRes.body() != null
+                                            ) {
+                                                partnerProfile = remoteRes.body()
+                                            }
+
+                                        } catch (e: Exception) {
+                                            Log.e(
+                                                "CloudSync",
+                                                "Failed to fetch match profile: $partnerEmail",
+                                                e
+                                            )
+                                        }
+                                    }
+
+                                    val profile = partnerProfile
+
+                                    if (profile != null && !profile.isMe) {
+
+                                        profileDao.insertProfiles(
+                                            listOf(
+                                                profile.copy(
+                                                    email = partnerEmail,
+                                                    connectionStatus = "ACCEPTED",
+                                                    isMe = false
+                                                )
+                                            )
+                                        )
+                                    }
+                                }
+                            }
                         }
                     }
-                } catch (e: Exception) { Log.e("CloudSync", "Sync loop fail") }
+
+                } catch (e: Exception) {
+
+                    Log.e(
+                        "CloudSync",
+                        "Sync loop fail",
+                        e
+                    )
+                }
+
                 delay(10000)
             }
         }
     }
-
     private fun loadCurrentUser() {
         viewModelScope.launch {
             val isLoggedIn = preferenceManager.isLoggedIn.first()
@@ -476,90 +739,265 @@ val profiles: StateFlow<List<UserProfile>> = combine(
         }
     }
 
-    fun onLike(p: UserProfile) { 
-        viewModelScope.launch { 
-            val me = _currentUser.value ?: return@launch
-            
-            // 1. SILENT DISCOVERY HIDE (Temporary UI hide)
-            _remoteProfiles.value = _remoteProfiles.value.filter { it.email != p.email }
-
-            try { 
-                // 2. ATOMIC SERVER ACTION (Deducts coins, saves like, checks match)
-                val response = RetrofitClient.apiService.swipeAction(SwipeActionRequest(p.email.trim().lowercase(), "LIKE"))
-                
-                if (response.isSuccessful && response.body() != null) {
-                    val res = response.body()!!
-                    
-                    // 3. UPDATE LIVE STATE FROM SERVER RESPONSE
-                    val newCoins = res.coins ?: (me.coins - 1)
-                    val newMe = me.copy(coins = newCoins)
-                    _currentUser.value = newMe
-                    profileDao.updateProfile(newMe)
-
-                    val status = if (res.matched == true) "ACCEPTED" else "LIKE"
-                    profileDao.insertProfiles(listOf(p.copy(email = p.email.trim().lowercase(), connectionStatus = status)))
-
-                    if (res.matched == true) {
-                        withContext(Dispatchers.Main) { Toast.makeText(app, "It's a Match! ❤️", Toast.LENGTH_LONG).show() }
-                    }
-                } else {
-                    Toast.makeText(app, "Insufficient coins or Error", Toast.LENGTH_SHORT).show()
-                    refreshFeed() // Profile wapas dikhao discovery mein
-                }
-            } catch (e: Exception) { Log.e("Action", "Like sync failed", e) }
-        } 
-    }
-
-    fun onSuperLike(p: UserProfile, onFail: (String) -> Unit) {
+    fun onLike(p: UserProfile) {
         viewModelScope.launch {
             val me = _currentUser.value ?: return@launch
-            
-            _remoteProfiles.value = _remoteProfiles.value.filter { it.email != p.email }
+            val targetEmail = p.email.trim().lowercase()
+
+            _remoteProfiles.value = _remoteProfiles.value.filter {
+                it.email.trim().lowercase() != targetEmail
+            }
 
             try {
-                val response = RetrofitClient.apiService.swipeAction(SwipeActionRequest(p.email.trim().lowercase(), "SUPERLIKE"))
+                val response = RetrofitClient.apiService.swipeAction(
+                    SwipeActionRequest(
+                        toUserId = targetEmail,
+                        action = "LIKE"
+                    )
+                )
+
                 if (response.isSuccessful && response.body() != null) {
-                    val res = response.body()!!
-                    
-                    val newCoins = res.coins ?: (me.coins - 10)
-                    val newMe = me.copy(coins = newCoins)
-                    _currentUser.value = newMe
-                    profileDao.updateProfile(newMe)
+                    val result = response.body()!!
 
-                    val status = if (res.matched == true) "ACCEPTED" else "SUPERLIKE"
-                    profileDao.insertProfiles(listOf(p.copy(email = p.email.trim().lowercase(), connectionStatus = status)))
-
-                    if (res.matched == true) {
-                        withContext(Dispatchers.Main) { Toast.makeText(app, "It's a Match! 🌟", Toast.LENGTH_LONG).show() }
+                    result.coins?.let { coins ->
+                        val updated = me.copy(coins = coins)
+                        _currentUser.value = updated
+                        profileDao.updateProfile(updated)
+                        preferenceManager.saveProfileCache(Gson().toJson(updated))
                     }
-                } else {
-                    onFail("Insufficient coins.")
+
+                    if (result.matched == true) {
+                        profileDao.insertProfiles(
+                            listOf(
+                                p.copy(
+                                    email = targetEmail,
+                                    connectionStatus = "ACCEPTED",
+                                    isMe = false
+                                )
+                            )
+                        )
+
+                        Toast.makeText(
+                            app,
+                            "It's a Match! ❤️",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    } else {
+                        profileDao.insertProfiles(
+                            listOf(
+                                p.copy(
+                                    email = targetEmail,
+                                    connectionStatus = "LIKED",
+                                    isMe = false
+                                )
+                            )
+                        )
+                    }
+
                     refreshFeed()
+
+                } else {
+                    val errorBody = response.errorBody()?.string().orEmpty()
+
+                    Log.e(
+                        "Action",
+                        "LIKE failed: ${response.code()} $errorBody"
+                    )
+
+                    refreshFeed()
+
+                    withContext(Dispatchers.Main) {
+                        if (errorBody.contains("Insufficient coins", true)) {
+                            Toast.makeText(
+                                app,
+                                "No coins available.",
+                                Toast.LENGTH_SHORT
+                            ).show()
+                        } else {
+                            Toast.makeText(
+                                app,
+                                "Unable to like this profile.",
+                                Toast.LENGTH_SHORT
+                            ).show()
+                        }
+                    }
                 }
-            } catch (e: Exception) { Log.e("Action", "Superlike sync failed", e) }
+
+            } catch (e: Exception) {
+                Log.e("Action", "LIKE sync failed", e)
+                refreshFeed()
+
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(
+                        app,
+                        "Connection error.",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
+            }
         }
     }
-    fun onAccept(p: UserProfile) { 
-        viewModelScope.launch { 
-            val me = _currentUser.value?.email ?: ""
-            if (me.isBlank()) return@launch
-            try { 
-                // 1. Local Update (Mirroring Server Expectation)
-                profileDao.insertProfiles(listOf(p.copy(connectionStatus = "ACCEPTED")))
-                
-                // 2. Cloud Update (Atomic Accept/Match on Server)
-                val response = RetrofitClient.apiService.swipeAction(SwipeActionRequest(p.email.trim().lowercase(), "ACCEPT"))
-                
-                if (response.isSuccessful) {
-                    Log.d("MatchLogic", "Successfully matched with ${p.email}")
+    fun onSuperLike(
+        p: UserProfile,
+        onFail: (String) -> Unit
+    ) {
+        viewModelScope.launch {
+            val me = _currentUser.value ?: return@launch
+            val targetEmail = p.email.trim().lowercase()
+
+            _remoteProfiles.value = _remoteProfiles.value.filter {
+                it.email.trim().lowercase() != targetEmail
+            }
+
+            try {
+                val response = RetrofitClient.apiService.swipeAction(
+                    SwipeActionRequest(
+                        toUserId = targetEmail,
+                        action = "SUPERLIKE"
+                    )
+                )
+
+                if (response.isSuccessful && response.body() != null) {
+                    val result = response.body()!!
+
+                    result.coins?.let { coins ->
+                        val updated = me.copy(coins = coins)
+                        _currentUser.value = updated
+                        profileDao.updateProfile(updated)
+                        preferenceManager.saveProfileCache(Gson().toJson(updated))
+                    }
+
+                    if (result.matched == true) {
+                        profileDao.insertProfiles(
+                            listOf(
+                                p.copy(
+                                    email = targetEmail,
+                                    connectionStatus = "ACCEPTED",
+                                    isMe = false
+                                )
+                            )
+                        )
+
+                        Toast.makeText(
+                            app,
+                            "It's a Match! 🌟",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    } else {
+                        profileDao.insertProfiles(
+                            listOf(
+                                p.copy(
+                                    email = targetEmail,
+                                    connectionStatus = "SUPERLIKE_SENT",
+                                    isMe = false
+                                )
+                            )
+                        )
+                    }
+
+                    refreshFeed()
+
+                } else {
+                    val errorBody = response.errorBody()?.string().orEmpty()
+
+                    Log.e(
+                        "Action",
+                        "SUPERLIKE failed: ${response.code()} $errorBody"
+                    )
+
+                    refreshFeed()
+
                     withContext(Dispatchers.Main) {
-                        Toast.makeText(app, "It's a Match! ❤️", Toast.LENGTH_LONG).show()
+                        if (errorBody.contains("Insufficient coins", true)) {
+                            onFail("No coins available.")
+                        } else {
+                            onFail("Unable to send Super Like.")
+                        }
                     }
                 }
-            } catch (e: Exception) { Log.e("API", "Accept fail", e) } 
-        } 
-    }
 
+            } catch (e: Exception) {
+                Log.e("Action", "SUPERLIKE sync failed", e)
+                refreshFeed()
+
+                withContext(Dispatchers.Main) {
+                    onFail("Connection error.")
+                }
+            }
+        }
+    }
+    fun onAccept(p: UserProfile) {
+        viewModelScope.launch {
+            val targetEmail = p.email.trim().lowercase()
+
+            if (targetEmail.isBlank()) return@launch
+
+            try {
+                val response = RetrofitClient.apiService.swipeAction(
+                    SwipeActionRequest(
+                        toUserId = targetEmail,
+                        action = "ACCEPT"
+                    )
+                )
+
+                if (response.isSuccessful && response.body()?.success == true) {
+
+                    // Incoming request is now a match.
+                    profileDao.insertProfiles(
+                        listOf(
+                            p.copy(
+                                email = targetEmail,
+                                connectionStatus = "ACCEPTED",
+                                isMe = false
+                            )
+                        )
+                    )
+
+                    Log.d(
+                        "MatchLogic",
+                        "MATCH CREATED with $targetEmail"
+                    )
+
+                    Toast.makeText(
+                        app,
+                        "It's a Match! ❤️",
+                        Toast.LENGTH_LONG
+                    ).show()
+
+                    // Pull authoritative server state.
+                    refreshFeed()
+
+                } else {
+                    val errorBody =
+                        response.errorBody()?.string().orEmpty()
+
+                    Log.e(
+                        "MatchLogic",
+                        "ACCEPT failed: ${response.code()} $errorBody"
+                    )
+
+                    Toast.makeText(
+                        app,
+                        "Unable to accept request.",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
+
+            } catch (e: Exception) {
+                Log.e(
+                    "MatchLogic",
+                    "ACCEPT exception",
+                    e
+                )
+
+                Toast.makeText(
+                    app,
+                    "Connection error.",
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
+        }
+    }
     fun deactivateAccount() {
         viewModelScope.launch {
             try {
@@ -590,24 +1028,206 @@ val profiles: StateFlow<List<UserProfile>> = combine(
             } catch (e: Exception) { Log.e("Report", "Fail") }
         }
     }
-    fun onReject(p: UserProfile) { 
-        viewModelScope.launch { 
-            try { 
-                profileDao.insertProfiles(listOf(p.copy(connectionStatus = "REJECTED")))
-                RetrofitClient.apiService.swipeAction(SwipeActionRequest(p.email, "REJECTED"))
-            } catch (e: Exception) {} 
-        } 
-    }
-    fun onDislike(p: UserProfile) { 
-        viewModelScope.launch { 
-            // Optimistic Reject
-            profileDao.insertProfiles(listOf(p.copy(connectionStatus = "REJECTED")))
-            _remoteProfiles.value = _remoteProfiles.value.filter { it.email != p.email }
-            
+    fun onReject(p: UserProfile) {
+        viewModelScope.launch {
+            val targetEmail = p.email.trim().lowercase()
+
+            if (targetEmail.isBlank()) return@launch
+
             try {
-                RetrofitClient.apiService.swipeAction(SwipeActionRequest(p.email, "REJECTED"))
-            } catch (e: Exception) { Log.e("Action", "Reject sync fail") }
-        } 
+                val response = RetrofitClient.apiService.swipeAction(
+                    SwipeActionRequest(
+                        toUserId = targetEmail,
+                        action = "REJECTED"
+                    )
+                )
+
+                if (response.isSuccessful && response.body() != null) {
+
+                    val result = response.body()!!
+
+                    result.coins?.let { coins ->
+                        _currentUser.value?.let { current ->
+                            val updated = current.copy(coins = coins)
+
+                            _currentUser.value = updated
+                            profileDao.updateProfile(updated)
+                            preferenceManager.saveProfileCache(
+                                Gson().toJson(updated)
+                            )
+                        }
+                    }
+
+                    // Sender sees this in Sent/Rejected.
+                    profileDao.insertProfiles(
+                        listOf(
+                            p.copy(
+                                email = targetEmail,
+                                connectionStatus = "REJECTED",
+                                isMe = false
+                            )
+                        )
+                    )
+
+                    Log.d(
+                        "Action",
+                        "REJECTED synced: $targetEmail"
+                    )
+
+                } else {
+                    val errorBody =
+                        response.errorBody()?.string().orEmpty()
+
+                    Log.e(
+                        "Action",
+                        "REJECTED failed: ${response.code()} $errorBody"
+                    )
+
+                    withContext(Dispatchers.Main) {
+                        if (errorBody.contains("Insufficient coins", true)) {
+                            Toast.makeText(
+                                app,
+                                "No coins available.",
+                                Toast.LENGTH_SHORT
+                            ).show()
+                        } else {
+                            Toast.makeText(
+                                app,
+                                "Unable to reject profile.",
+                                Toast.LENGTH_SHORT
+                            ).show()
+                        }
+                    }
+                }
+
+            } catch (e: Exception) {
+                Log.e(
+                    "Action",
+                    "REJECTED sync failed",
+                    e
+                )
+
+                Toast.makeText(
+                    app,
+                    "Connection error.",
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
+        }
+    }
+    fun onDislike(p: UserProfile) {
+        viewModelScope.launch {
+
+            val targetEmail = p.email.trim().lowercase()
+
+            // Immediately remove from discovery
+            _remoteProfiles.value = _remoteProfiles.value.filter {
+                it.email.trim().lowercase() != targetEmail
+            }
+
+            try {
+                val response = RetrofitClient.apiService.swipeAction(
+                    SwipeActionRequest(
+                        targetEmail,
+                        "REJECTED"
+                    )
+                )
+
+                if (response.isSuccessful && response.body() != null) {
+
+                    val result = response.body()!!
+
+                    // SERVER/DYNAMODB IS THE SOURCE OF TRUTH
+                    result.coins?.let { serverCoins ->
+
+                        _currentUser.value?.let { current ->
+
+                            val updated = current.copy(
+                                coins = serverCoins
+                            )
+
+                            _currentUser.value = updated
+
+                            profileDao.updateProfile(updated)
+
+                            preferenceManager.saveProfileCache(
+                                Gson().toJson(updated)
+                            )
+                        }
+                    }
+
+                    profileDao.insertProfiles(
+                        listOf(
+                            p.copy(
+                                email = targetEmail,
+                                connectionStatus = "REJECTED",
+                                isMe = false
+                            )
+                        )
+                    )
+
+                    Log.d(
+                        "Action",
+                        "Dislike synced successfully: $targetEmail"
+                    )
+
+                } else {
+
+                    val errorBody =
+                        response.errorBody()?.string().orEmpty()
+
+                    Log.e(
+                        "Action",
+                        "Dislike failed: ${response.code()} $errorBody"
+                    )
+
+                    refreshFeed()
+
+                    withContext(Dispatchers.Main) {
+
+                        if (
+                            errorBody.contains(
+                                "Insufficient coins",
+                                ignoreCase = true
+                            )
+                        ) {
+
+                            Toast.makeText(
+                                app,
+                                "No coins. Earn 5 coins by watching an ad or buy coins.",
+                                Toast.LENGTH_LONG
+                            ).show()
+
+                        } else {
+
+                            Toast.makeText(
+                                app,
+                                "Unable to reject this profile. Please try again.",
+                                Toast.LENGTH_SHORT
+                            ).show()
+                        }
+                    }
+                }
+
+            } catch (e: Exception) {
+
+                Log.e(
+                    "Action",
+                    "Reject sync fail",
+                    e
+                )
+
+                refreshFeed()
+
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(
+                        app,
+                        "Connection error. Please try again.",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
+            }
+        }
     }
     fun onUndoDislike(p: UserProfile) {
         viewModelScope.launch {
@@ -669,17 +1289,57 @@ val profiles: StateFlow<List<UserProfile>> = combine(
     fun setRegistrationData(n: String, a: Int, e: String, p: String, c: String, s: String, g: String, pass: String, ref: String = "") { 
         _regData.value = RegistrationData(name = n, age = a, email = e, phone = p, country = c, state = s, gender = g, password = pass, referredBy = ref) 
     }
-    
+
     fun onAdRewarded() {
         viewModelScope.launch {
-            _currentUser.value?.let { me ->
-                val updated = me.copy(coins = me.coins + 5, deviceId = myDeviceId)
-                profileDao.updateProfile(updated)
-                try {
-                    RetrofitClient.apiService.saveProfileSecure(profile = updated)
-                } catch (e: Exception) {}
-                Toast.makeText(app, "5 Coins Earned! 🪙", Toast.LENGTH_LONG).show()
-                loadCurrentUser()
+            try {
+                val response = RetrofitClient.apiService.rewardCoins()
+
+                if (response.isSuccessful && response.body() != null) {
+                    val result = response.body()!!
+                    val serverCoins = result.coins
+
+                    if (serverCoins != null) {
+                        val me = _currentUser.value
+
+                        if (me != null) {
+                            val updated = me.copy(
+                                coins = serverCoins
+                            )
+
+                            _currentUser.value = updated
+                            profileDao.updateProfile(updated)
+                            preferenceManager.saveProfileCache(
+                                Gson().toJson(updated)
+                            )
+                        }
+
+                        Toast.makeText(
+                            app,
+                            "5 Coins Earned! 🪙",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
+                } else {
+                    Log.e(
+                        "Coins",
+                        "Reward failed: ${response.code()} ${response.errorBody()?.string()}"
+                    )
+
+                    Toast.makeText(
+                        app,
+                        "Coins update failed. Please try again.",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
+            } catch (e: Exception) {
+                Log.e("Coins", "Reward sync failed", e)
+
+                Toast.makeText(
+                    app,
+                    "Connection error. Coins were not added.",
+                    Toast.LENGTH_SHORT
+                ).show()
             }
         }
     }
@@ -775,30 +1435,131 @@ val profiles: StateFlow<List<UserProfile>> = combine(
         
         try {
             // 1. COMPRESS AND UPLOAD PHOTO
+            // 1. RESIZE + COMPRESS + UPLOAD PHOTO
             var cloudPhotoUrl = ""
+
             try {
-                withTimeout(120000) { // 2 minutes timeout
+                withTimeout(120000) { // Keep 2-minute upload timeout
                     val contentResolver = app.contentResolver
+
                     val inputStream = contentResolver.openInputStream(Uri.parse(localUri))
+                        ?: throw Exception("Unable to open selected photo")
+
                     val originalBitmap = android.graphics.BitmapFactory.decodeStream(inputStream)
-                    
-                    // Resize and Compress to under 1MB
+                    inputStream.close()
+
+                    if (originalBitmap == null) {
+                        throw Exception("Unable to read selected photo")
+                    }
+
+                    // -----------------------------------------
+                    // Resize large photos before uploading.
+                    // Maximum dimension = 1600 px
+                    // -----------------------------------------
+                    val maxDimension = 1600
+
+                    val width = originalBitmap.width
+                    val height = originalBitmap.height
+
+                    val scale = minOf(
+                        1f,
+                        maxDimension.toFloat() / maxOf(width, height).toFloat()
+                    )
+
+                    val resizedBitmap =
+                        if (scale < 1f) {
+                            android.graphics.Bitmap.createScaledBitmap(
+                                originalBitmap,
+                                (width * scale).toInt(),
+                                (height * scale).toInt(),
+                                true
+                            )
+                        } else {
+                            originalBitmap
+                        }
+
+                    // -----------------------------------------
+                    // JPEG compression
+                    // Quality 80 gives good profile-photo quality
+                    // while keeping upload size reasonable.
+                    // -----------------------------------------
                     val out = java.io.ByteArrayOutputStream()
-                    originalBitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 70, out)
+
+                    resizedBitmap.compress(
+                        android.graphics.Bitmap.CompressFormat.JPEG,
+                        80,
+                        out
+                    )
+
                     val bytes = out.toByteArray()
-                    
-                    val base64 = android.util.Base64.encodeToString(bytes, android.util.Base64.DEFAULT)
-                    val uploadResult = RetrofitClient.apiService.uploadImageSecure(request = ImageUploadRequest(base64))
-                    
+
+                    // Release bitmap memory
+                    if (resizedBitmap !== originalBitmap) {
+                        resizedBitmap.recycle()
+                    }
+
+                    originalBitmap.recycle()
+
+                    Log.d(
+                        "Signup",
+                        "Photo compressed: ${bytes.size / 1024} KB"
+                    )
+
+                    // -----------------------------------------
+                    // Safety check
+                    // Don't send unnecessarily huge files.
+                    // -----------------------------------------
+                    if (bytes.size > 3 * 1024 * 1024) {
+                        throw Exception("Compressed photo is still too large")
+                    }
+
+                    val base64 = android.util.Base64.encodeToString(
+                        bytes,
+                        android.util.Base64.NO_WRAP
+                    )
+
+                    val uploadResult =
+                        RetrofitClient.apiService.uploadImageSecure(
+                            request = ImageUploadRequest(base64)
+                        )
+
                     if (uploadResult.isSuccessful) {
-                        cloudPhotoUrl = uploadResult.body()?.get("url") ?: throw Exception("URL missing")
+                        cloudPhotoUrl =
+                            uploadResult.body()?.get("url")
+                                ?: throw Exception("Photo URL missing")
                     } else {
-                        throw Exception("Server rejected upload: ${uploadResult.code()}")
+                        val errorBody =
+                            uploadResult.errorBody()?.string().orEmpty()
+
+                        Log.e(
+                            "Signup",
+                            "Photo upload rejected: ${uploadResult.code()} $errorBody"
+                        )
+
+                        throw Exception(
+                            "Server rejected upload: ${uploadResult.code()}"
+                        )
                     }
                 }
+
             } catch (e: Exception) {
-                Log.e("Signup", "Photo upload failed", e)
-                return "Photo upload failed or timed out. Please try again with better internet."
+
+                Log.e(
+                    "Signup",
+                    "Photo upload failed",
+                    e
+                )
+
+                return when {
+                    e is kotlinx.coroutines.TimeoutCancellationException ->
+                        "Photo upload timed out. Please try again with a better internet connection."
+
+                    e.message?.contains("too large", true) == true ->
+                        "Photo is too large. Please select another photo."
+
+                    else ->
+                        "Photo upload failed. Please try again."
+                }
             }
 
             // 2. Validation Check via Server
@@ -1008,7 +1769,21 @@ val profiles: StateFlow<List<UserProfile>> = combine(
                     
                     val base64 = android.util.Base64.encodeToString(bytes, android.util.Base64.DEFAULT)
                     val result = RetrofitClient.apiService.uploadImageSecure(request = ImageUploadRequest(base64))
-                    cloudPhotoUrl = if (result.isSuccessful) result.body()?.get("url") ?: throw Exception("URL missing") else throw Exception("Upload failed")
+                    if (result.isSuccessful) {
+                        cloudPhotoUrl = result.body()?.get("url")
+                            ?: throw Exception("URL missing")
+                    } else {
+                        val errorBody = result.errorBody()?.string().orEmpty()
+
+                        Log.e(
+                            "Upload",
+                            "Primary photo upload failed: HTTP ${result.code()} - $errorBody"
+                        )
+
+                        throw Exception(
+                            "Upload failed: HTTP ${result.code()} $errorBody"
+                        )
+                    }
                 }
                 
                 _currentUser.value?.let { 
@@ -1142,8 +1917,24 @@ val profiles: StateFlow<List<UserProfile>> = combine(
                 
                 _uploadProgress.value = 50
                 val result = RetrofitClient.apiService.uploadImageSecure(request = ImageUploadRequest(base64))
-                val url = if (result.isSuccessful) result.body()?.get("url") else null
-                if (url == null) throw Exception("Upload failed")
+                val url = if (result.isSuccessful) {
+                    result.body()?.get("url")
+                } else {
+                    val errorBody = result.errorBody()?.string().orEmpty()
+
+                    Log.e(
+                        "Chat",
+                        "Image upload failed: HTTP ${result.code()} - $errorBody"
+                    )
+
+                    null
+                }
+
+                if (url.isNullOrBlank()) {
+                    throw Exception(
+                        "Upload failed: HTTP ${result.code()}"
+                    )
+                }
                 
                 _uploadProgress.value = 100
                 _uploadProgress.value = null
