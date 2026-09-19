@@ -444,8 +444,38 @@ app.post('/api/report', authenticateToken, async (req, res) => {
 });
 
 app.post('/profile/save', authenticateToken, async (req, res) => {
-    try { const data = { ...req.body, email: req.user.email }; await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email: req.user.email }, UpdateExpression: "SET #u = :u, age = :age, gender = :gender, country = :country, state = :state, photoUri = :photoUri, bio = :bio", ExpressionAttributeNames: { "#u": "username" }, ExpressionAttributeValues: { ":u": data.username, ":age": data.age, ":gender": data.gender, ":country": data.country, ":state": data.state, ":photoUri": data.photoUri, ":bio": data.bio } })); res.json({ success: true }); }
-    catch (e) { res.status(500).json({ error: e.message }); }
+    try {
+        const data = { ...req.body, email: req.user.email };
+
+        await ddb.send(new UpdateCommand({
+            TableName: TABLES.USERS,
+            Key: { email: req.user.email },
+
+            UpdateExpression:
+                "SET #name = :name, #u = :u, age = :age, gender = :gender, country = :country, state = :state, photoUri = :photoUri, bio = :bio",
+
+            ExpressionAttributeNames: {
+                "#name": "name",
+                "#u": "username"
+            },
+
+            ExpressionAttributeValues: {
+                ":name": data.name || "",
+                ":u": data.username || "",
+                ":age": data.age,
+                ":gender": data.gender,
+                ":country": data.country,
+                ":state": data.state,
+                ":photoUri": data.photoUri || "",
+                ":bio": data.bio || ""
+            }
+        }));
+
+        res.json({ success: true });
+    }
+    catch (e) {
+        res.status(500).json({ error: e.message });
+    }
 });
 
 app.get('/profile/me', authenticateToken, async (req, res) => {
