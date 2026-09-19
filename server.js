@@ -171,7 +171,12 @@ const incomingSuperlikes = [...incomingMap.values()].filter(l => {
         const matches = await ddb.send(new ScanCommand({ TableName: TABLES.MATCHES, FilterExpression: "contains(#u, :me)", ExpressionAttributeNames: { "#u": "users" }, ExpressionAttributeValues: { ":me": email } }));
         res.json({
             user: profileMap[email],
-            sent: (sent.Items || []).map(l => ({ fromUserId: l.fromUserId, toUserId: l.toUserId, action: l.action, timestamp: l.timestamp || 0 })),
+           sent: sent.map(l => ({
+    fromUserId: l.fromUserId,
+    toUserId: l.toUserId,
+    action: l.action,
+    timestamp: l.timestamp || 0
+})),
            // 01
            incomingLikes: incomingLikes.map(l => ({
     fromUserId: l.fromUserId,
