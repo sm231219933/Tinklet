@@ -521,14 +521,39 @@ app.post('/api/account/logout', authenticateToken, async (req, res) => {
 app.get('/health', (req, res) => res.json({ ok: true }));
 
 io.on('connection', (socket) => {
-    socket.on('join', (email) => socket.join(String(email || '').toLowerCase()));
-    socket.on('send_message', async (data) => {
+    // User ko room me join karwao
+    socket.on('join', (email) => {
+        const room = String(email || '').toLowerCase();
+        socket.join(room);
+        console.log(`User joined: ${room}`);
+    });
+
+    // Chat aur Calling ke liye common Signal handler
+    socket.on('signal', async (data) => {
         try {
-            const item = { matchId: data.matchId, messageId: uuidv4(), sender: String(data.sender || '').toLowerCase(), text: data.text || '', imageUrl: data.imageUrl || '', timestamp: Date.now() };
-            await ddb.send(new PutCommand({ TableName: "Messages", Item: item }));
-            io.to(String(data.receiver || '').toLowerCase()).emit('new_message', item);
-            io.to(String(data.sender || '').toLowerCase()).emit('new_message', item);
-        } catch (e) { console.error('socket send_message error:', e.message); }
+            const receiver = String(data.to || '').toLowerCase();
+            const sender = String(data.from || '').toLowerCase();
+
+            // Agar ye Chat Message hai, toh use save karo aur bhej do
+            if (data.type === 'chat_message') {
+                const item = { 
+                    matchId: sender, // Receiver ke side par bhejnewala hi matchId hota hai
+                    messageId: data.messageId || uuidv4(),
+                    sender: sender,
+                    text: data.sdp || '', // App 'sdp' me text bhej rahi hai chat ke liye
+                    timestamp: Date.now() 
+                };
+                
+                // 1. Database me save karo
+                await ddb.send(new PutCommand({ TableName: "Messages", Item: item }));
+
+                // 2. Samne wale user ko "chat_message" emit karo (kyuki App iska intezar kar rahi hai)
+                io.to(receiver).emit('chat_message', item);
+            } else {
+                // Agar ye message nahi, calling signal (offer/answer) hai, toh bas forward kar do
+                io.to(receiver).emit('signal', data);
+            }
+        } catch (e) { console.error('Signal Error:', e.message); }
     });
 });
 
