@@ -301,17 +301,19 @@ if (action === "LIKE" || action === "SUPERLIKE") {
             await ddb.send(new DeleteCommand({ TableName: TABLES.LIKES, Key: { fromUserId: fromEmail, toUserId } }));
             return res.json({ success: true, matched: false, coins: coinUpdate.Attributes.coins });
         }
-
-        if (action === "REJECTED") {
-            const reverse = await ddb.send(new GetCommand({ TableName: TABLES.LIKES, Key: { fromUserId: toUserId, toUserId: fromEmail } }));
-            const reverseAction = String(reverse.Item?.action || "").toUpperCase();
-            if (["LIKE", "SUPERLIKE"].includes(reverseAction)) {
-                await ddb.send(new PutCommand({ TableName: TABLES.LIKES, Item: { fromUserId: toUserId, toUserId: fromEmail, action: "REJECTED_BY_RECEIVER", previousAction: reverseAction, timestamp: Date.now() } }));
-            }
-            await setInteractionStatus(fromEmail, toUserId, "REJECTED");
-            await ddb.send(new PutCommand({ TableName: TABLES.LIKES, Item: { fromUserId: fromEmail, toUserId, action: "REJECTED", timestamp: Date.now() } }));
-            return res.json({ success: true, matched: false, coins: coinUpdate.Attributes.coins });
-        }
+01
+       if (action === "REJECTED") {
+    // Sirf humare interactions me targets ko REJECTED mark karo
+    await setInteractionStatus(fromEmail, toUserId, "REJECTED");
+    
+    // Likes table me entry dalo ki maine isko reject kiya hai
+    await ddb.send(new PutCommand({
+        TableName: TABLES.LIKES,
+        Item: { fromUserId: fromEmail, toUserId: toUserId, action: "REJECTED", timestamp: Date.now() }
+    }));
+    
+    return res.json({ success: true, matched: false, coins: coinUpdate.Attributes.coins });
+}  01
 
         await setInteractionStatus(fromEmail, toUserId, action);
         await ddb.send(new PutCommand({ TableName: TABLES.LIKES, Item: { fromUserId: fromEmail, toUserId, action, timestamp: Date.now() } }));
