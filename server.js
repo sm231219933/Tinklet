@@ -171,35 +171,53 @@ const incomingSuperlikes = [...incomingMap.values()].filter(l => {
            myInteractionWithPartner !== "ACCEPTED" &&
            myInteractionWithPartner !== "REJECTED";
 });
-        
+        const incomingRejected = [...incomingMap.values()].filter(l => {
+    const actionUpper = String(l.action || "").trim().toUpperCase();
+    const fromEmail = String(l.fromUserId || "").trim().toLowerCase();
+    const toEmail = String(l.toUserId || "").trim().toLowerCase();
+
+    return (
+        fromEmail !== email &&
+        toEmail === email &&
+        actionUpper === "REJECTED"
+    );
+});
       //  01
 
         const matches = await ddb.send(new ScanCommand({ TableName: TABLES.MATCHES, FilterExpression: "contains(#u, :me)", ExpressionAttributeNames: { "#u": "users" }, ExpressionAttributeValues: { ":me": email } }));
         res.json({
-            user: profileMap[email],
-           sent: sent.map(l => ({
-    fromUserId: l.fromUserId,
-    toUserId: l.toUserId,
-    action: l.action,
-    timestamp: l.timestamp || 0
-})),
-           // 01
-           incomingLikes: incomingLikes.map(l => ({
-    fromUserId: l.fromUserId,
-    toUserId: l.toUserId,
-    action: l.action,
-    timestamp: l.timestamp || 0
-})),
+    user: profileMap[email],
 
-incomingSuperlikes: incomingSuperlikes.map(l => ({
-    fromUserId: l.fromUserId,
-    toUserId: l.toUserId,
-    action: l.action,
-    timestamp: l.timestamp || 0
-})),
-           // 01
-            matches: (matches.Items || [])
-        });
+    sent: sent.map(l => ({
+        fromUserId: l.fromUserId,
+        toUserId: l.toUserId,
+        action: l.action,
+        timestamp: l.timestamp || 0
+    })),
+
+    incomingLikes: incomingLikes.map(l => ({
+        fromUserId: l.fromUserId,
+        toUserId: l.toUserId,
+        action: l.action,
+        timestamp: l.timestamp || 0
+    })),
+
+    incomingSuperlikes: incomingSuperlikes.map(l => ({
+        fromUserId: l.fromUserId,
+        toUserId: l.toUserId,
+        action: l.action,
+        timestamp: l.timestamp || 0
+    })),
+
+    incomingRejected: incomingRejected.map(l => ({
+        fromUserId: l.fromUserId,
+        toUserId: l.toUserId,
+        action: l.action,
+        timestamp: l.timestamp || 0
+    })),
+
+    matches: (matches.Items || [])
+});
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
