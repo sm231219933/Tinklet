@@ -8,7 +8,34 @@ import retrofit2.converter.gson.GsonConverterFactory
 import retrofit2.http.*
 import java.util.concurrent.TimeUnit
 
+data class CoinResponse(
+    val success: Boolean = false,
+    val coins: Int? = null,
+    val error: String? = null
+
+)
+data class ReportUserRequest(
+    val reportedEmail: String,
+    val reason: String,
+    val description: String = ""
+)
+
+data class ReportUserResponse(
+    val success: Boolean = false,
+    val reportId: String? = null,
+    val createdAt: String? = null,
+    val error: String? = null
+)
 interface DatingApiService {
+
+    @POST("api/report")
+    suspend fun reportUser(
+        @Body request: ReportUserRequest
+    ): Response<ReportUserResponse>
+
+    @POST("api/coins/reward")
+    suspend fun rewardCoins(): Response<CoinResponse>
+
     @POST("profile")
     suspend fun updateProfile(@Body profile: UserProfile): Response<Map<String, Boolean>>
 
@@ -95,16 +122,27 @@ interface DatingApiService {
 }
 
 data class SyncAllResponse(
-    val sent: List<UserProfile>,
-    val incoming: List<UserProfile>,
-    val matches: List<UserProfile>
+    val user: UserProfile? = null,
+    val sent: List<SwipeActionRecord> = emptyList(),
+    val incomingLikes: List<SwipeActionRecord> = emptyList(),
+    val incomingSuperlikes: List<SwipeActionRecord> = emptyList(),
+    val incomingRejected: List<SwipeActionRecord> = emptyList(),
+    val matches: List<Map<String, Any>> = emptyList()
+)
+
+data class SwipeActionRecord(
+    val fromUserId: String = "",
+    val toUserId: String = "",
+    val action: String = "",
+    val timestamp: Long = 0,
+    val profile: UserProfile? = null
 )
 
 data class SignupRequest(
-    val email: String, 
-    val password: String, 
-    val name: String, 
-    val age: Int, 
+    val email: String,
+    val password: String,
+    val name: String,
+    val age: Int,
     val gender: String,
     val phoneNumber: String = "",
     val photoUri: String = "",
@@ -119,7 +157,7 @@ data class LoginRequest(val email: String, val password: String)
 data class AuthResponse(val token: String, val user: UserProfile)
 data class SwipeActionRequest(val toUserId: String, val action: String)
 data class SwipeActionResponse(
-    val success: Boolean, 
+    val success: Boolean,
     val matched: Boolean? = false,
     val matchId: String? = null,
     val coins: Int? = null
