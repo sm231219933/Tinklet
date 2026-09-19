@@ -154,7 +154,7 @@ const incoming = [...incomingMap.values()].filter(l => {
     return ["LIKE"].includes(actionUpper) && 
            myInteractionWithPartner !== "ACCEPTED" && 
            myInteractionWithPartner !== "REJECTED";
-
+});
     const incoming = [...incomingMap.values()].filter(l => {
     const actionUpper = String(l.action || "").toUpperCase();
     const partnerEmail = String(l.fromUserId || "").trim().toLowerCase();
