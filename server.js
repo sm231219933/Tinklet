@@ -111,7 +111,24 @@ app.get('/api/sync/all', authenticateToken, async (req, res) => {
         const allUsers = await ddb.send(new ScanCommand({ TableName: TABLES.USERS }));
         const profileMap = {};
         (allUsers.Items || []).forEach(u => { if (u.email) profileMap[u.email.toLowerCase()] = { ...u, photoUri: u.photoUri || u.photoUrl || "" }; });
-        const sent = await ddb.send(new QueryCommand({ TableName: TABLES.LIKES, KeyConditionExpression: "fromUserId = :me", ExpressionAttributeValues: { ":me": email } }));
+      //01
+        const sentResult = await ddb.send(new QueryCommand({
+    TableName: TABLES.LIKES,
+    KeyConditionExpression: "fromUserId = :me",
+    ExpressionAttributeValues: { ":me": email }
+}));
+
+// Sent me sirf meri taraf se bheje gaye pending LIKE/SUPERLIKE dikhen.
+// ACCEPTED/REJECTED ko Sent request nahi maana jayega.
+const sent = (sentResult.Items || []).filter(l => {
+    const action = String(l.action || "").trim().toUpperCase();
+
+    return (
+        ["LIKE", "SUPERLIKE"].includes(action) &&
+        String(l.fromUserId || "").trim().toLowerCase() === email
+    );
+});
+}));  //01
 
         let incomingItems = [];
         try {
