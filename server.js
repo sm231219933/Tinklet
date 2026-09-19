@@ -195,26 +195,29 @@ const incomingSuperlikes = [...incomingMap.values()].filter(l => {
         timestamp: l.timestamp || 0
     })),
 
-    incomingLikes: incomingLikes.map(l => ({
-        fromUserId: l.fromUserId,
-        toUserId: l.toUserId,
-        action: l.action,
-        timestamp: l.timestamp || 0
-    })),
+   incomingLikes: incomingLikes.map(l => ({
+    fromUserId: l.fromUserId,
+    toUserId: l.toUserId,
+    action: l.action,
+    timestamp: l.timestamp || 0,
+    profile: profileMap[String(l.fromUserId || "").trim().toLowerCase()] || null
+})),
 
-    incomingSuperlikes: incomingSuperlikes.map(l => ({
-        fromUserId: l.fromUserId,
-        toUserId: l.toUserId,
-        action: l.action,
-        timestamp: l.timestamp || 0
-    })),
+incomingSuperlikes: incomingSuperlikes.map(l => ({
+    fromUserId: l.fromUserId,
+    toUserId: l.toUserId,
+    action: l.action,
+    timestamp: l.timestamp || 0,
+    profile: profileMap[String(l.fromUserId || "").trim().toLowerCase()] || null
+})),
 
-    incomingRejected: incomingRejected.map(l => ({
-        fromUserId: l.fromUserId,
-        toUserId: l.toUserId,
-        action: l.action,
-        timestamp: l.timestamp || 0
-    })),
+incomingRejected: incomingRejected.map(l => ({
+    fromUserId: l.fromUserId,
+    toUserId: l.toUserId,
+    action: l.action,
+    timestamp: l.timestamp || 0,
+    profile: profileMap[String(l.fromUserId || "").trim().toLowerCase()] || null
+})),
 
     matches: (matches.Items || [])
 });
