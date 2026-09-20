@@ -542,25 +542,28 @@ io.on('connection', (socket) => {
             const text = data.text || data.sdp || ''; // App dono field use karti hai
             const messageId = data.messageId || uuidv4();
 
-            const item = { 
-                matchId: fromUserId, // Receiver ke side par bhejnewala hi matchId hota hai
-                messageId: messageId,
-                sender: fromUserId,
-                text: text,
-                timestamp: Date.now() 
-            };
+           const users = [fromUserId, toUserId].sort();
+const matchId = `${users[0]}_${users[1]}`;
+
+const item = { 
+    matchId: matchId,
+    messageId: messageId,
+    sender: fromUserId,
+    text: text,
+    timestamp: Date.now() 
+};
 
             // Database me save karo
             await ddb.send(new PutCommand({ TableName: "Messages", Item: item }));
 
             // Samne wale ko real-time bhej do
             io.to(toUserId).emit('chat:message', {
-                fromUserId: fromUserId,
-                text: text,
-                messageId: messageId,
-                timestamp: item.timestamp
-            });
-
+    fromUserId: fromUserId,
+    toUserId: toUserId,
+    text: text,
+    messageId: messageId,
+    timestamp: item.timestamp
+});
         } catch (e) { console.error('Socket chat error:', e.message); }
     });
 
