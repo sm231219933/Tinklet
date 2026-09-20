@@ -9,9 +9,9 @@ import kotlinx.serialization.Serializable
 data class UserProfile(
     @PrimaryKey val email: String = "", 
     val userId: String = "", 
-    val name: String = "Tinklet User",
-    val age: Int = 18,
-    val gender: String = "Neutral",
+    val name: String = "",
+    val age: Int = 0,
+    val gender: String = "",
     val phoneNumber: String = "",
     val country: String = "",
     val state: String = "",
