@@ -519,43 +519,59 @@ app.post('/api/account/logout', authenticateToken, async (req, res) => {
 });
 
 app.get('/health', (req, res) => res.json({ ok: true }));
-
+//01
 io.on('connection', (socket) => {
-    // User ko room me join karwao
+    // 1. Register/Join: App dono me se koi bhi bhej sakti hai
+    socket.on('register', (userId) => {
+        const room = String(userId || '').toLowerCase();
+        socket.join(room);
+        console.log(`User registered in room: ${room}`);
+    });
+
     socket.on('join', (email) => {
         const room = String(email || '').toLowerCase();
         socket.join(room);
-        console.log(`User joined: ${room}`);
+        console.log(`User joined room: ${room}`);
     });
 
-    // Chat aur Calling ke liye common Signal handler
-    socket.on('signal', async (data) => {
+    // 2. Structured Chat Message Handler
+    socket.on('chat:message', async (data) => {
         try {
-            const receiver = String(data.to || '').toLowerCase();
-            const sender = String(data.from || '').toLowerCase();
+            const toUserId = String(data.toUserId || '').toLowerCase();
+            const fromUserId = String(data.fromUserId || '').toLowerCase();
+            const text = data.text || data.sdp || ''; // App dono field use karti hai
+            const messageId = data.messageId || uuidv4();
 
-            // Agar ye Chat Message hai, toh use save karo aur bhej do
-            if (data.type === 'chat_message') {
-                const item = { 
-                    matchId: sender, // Receiver ke side par bhejnewala hi matchId hota hai
-                    messageId: data.messageId || uuidv4(),
-                    sender: sender,
-                    text: data.sdp || '', // App 'sdp' me text bhej rahi hai chat ke liye
-                    timestamp: Date.now() 
-                };
-                
-                // 1. Database me save karo
-                await ddb.send(new PutCommand({ TableName: "Messages", Item: item }));
+            const item = { 
+                matchId: fromUserId, // Receiver ke side par bhejnewala hi matchId hota hai
+                messageId: messageId,
+                sender: fromUserId,
+                text: text,
+                timestamp: Date.now() 
+            };
 
-                // 2. Samne wale user ko "chat_message" emit karo (kyuki App iska intezar kar rahi hai)
-                io.to(receiver).emit('chat_message', item);
-            } else {
-                // Agar ye message nahi, calling signal (offer/answer) hai, toh bas forward kar do
-                io.to(receiver).emit('signal', data);
-            }
-        } catch (e) { console.error('Signal Error:', e.message); }
+            // Database me save karo
+            await ddb.send(new PutCommand({ TableName: "Messages", Item: item }));
+
+            // Samne wale ko real-time bhej do
+            io.to(toUserId).emit('chat:message', {
+                fromUserId: fromUserId,
+                text: text,
+                messageId: messageId,
+                timestamp: item.timestamp
+            });
+
+        } catch (e) { console.error('Socket chat error:', e.message); }
     });
+
+    // 3. Structured Calling Handlers (SignalingClient.kt ke liye)
+    socket.on('call:offer', (data) => io.to(String(data.toUserId).toLowerCase()).emit('call:incoming', data));
+    socket.on('call:answer', (data) => io.to(String(data.toUserId).toLowerCase()).emit('call:answered', data));
+    socket.on('call:reject', (data) => io.to(String(data.toUserId).toLowerCase()).emit('call:rejected', data));
+    socket.on('call:ice-candidate', (data) => io.to(String(data.toUserId).toLowerCase()).emit('call:ice-candidate', data));
+    socket.on('call:end', (data) => io.to(String(data.toUserId).toLowerCase()).emit('call:ended', data));
 });
+//01
 
 const PORT = process.env.PORT || 4000;
 masterServer.listen(PORT, '0.0.0.0', () => console.log(`Tinklet API running on port ${PORT}`));
