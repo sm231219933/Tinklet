@@ -1916,8 +1916,11 @@ class DiscoveryViewModel(private val app: Application) : AndroidViewModel(app) {
 
             if (myId.isBlank() || targetEmail.isBlank() || text.isBlank()) return@launch
 
+            val users = listOf(myId, targetEmail).sorted()
+            val matchId = "${users[0]}_${users[1]}"
+
             val msg = ChatMessage(
-                matchId = targetEmail,
+                matchId = matchId,
                 senderId = if (isMe) "ME" else "OTHER",
                 text = text
             )
@@ -1926,24 +1929,34 @@ class DiscoveryViewModel(private val app: Application) : AndroidViewModel(app) {
             chatMessageDao.insertMessage(msg)
 
             try {
-                // Save message on server
-                RetrofitClient.apiService.saveMessageSecure(
+                val response = RetrofitClient.apiService.saveMessageSecure(
                     request = ChatSendRequest(
                         matchId = targetEmail,
                         text = text
                     )
                 )
 
-                // Send real-time message to the other user
-                signaling?.sendSignal(
-                    targetEmail,
-                    "chat_message",
-                    sdp = text,
-                    messageId = msg.messageId
-                )
+                if (response.isSuccessful) {
+                    Log.d(
+                        "ChatSend",
+                        "Message saved successfully: ${response.code()}"
+                    )
 
-            } catch (e: Exception) {
-                Log.e("DiscoveryViewModel", "Chat message send failed", e)
+                    signaling?.sendSignal(
+                        targetEmail,
+                        "chat_message",
+                        sdp = text,
+                        messageId = msg.messageId
+                    )
+                } else {
+                    val error = response.errorBody()?.string().orEmpty()
+                    Log.e(
+                        "ChatSend",
+                        "Message save failed: HTTP ${response.code()} - $error"
+                    )
+                }
+            }catch (e: Exception) {
+                Log.e("DiscoveryViewModel", "Chat message send sync failed", e)
             }
         }
     }
