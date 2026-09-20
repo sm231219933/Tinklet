@@ -579,9 +579,6 @@ io.on('connection', (socket) => {
            const users = [fromUserId, toUserId].sort();
 const matchId = `${users[0]}_${users[1]}`;
 
-const users = [fromUserId, toUserId].sort();
-const matchId = `${users[0]}_${users[1]}`;
-
 const item = { 
     matchId: matchId,
     messageId: messageId,
