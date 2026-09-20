@@ -437,6 +437,7 @@ fun ChatScreen(
                                 val message = textState.trim()
                                 if (message.isNotEmpty()) {
                                     onSendMessage(message)
+                                    textState = ""
                                 }
                             },
                             modifier = Modifier.background(Color(0xFFFE3C72), CircleShape)
