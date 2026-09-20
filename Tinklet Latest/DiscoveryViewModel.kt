@@ -271,7 +271,7 @@ class DiscoveryViewModel(private val app: Application) : AndroidViewModel(app) {
         if (userId.isBlank()) return
         
         Log.d("Signaling_Trace", "Initializing Socket.io Signaling for $userId")
-        signaling = SignalingClient("http://15.206.14.213:4000", userId, object : SignalingClient.SignalingListener {
+        signaling = SignalingClient("http://15.252.204.160:4000", userId, object : SignalingClient.SignalingListener {
             override fun onIncomingCall(fromUserId: String, fromUserName: String, offer: String, callType: String) {
                 Log.d("Signaling_Trace", "INCOMING CALL EVENT from $fromUserId")
                 
@@ -1916,11 +1916,8 @@ class DiscoveryViewModel(private val app: Application) : AndroidViewModel(app) {
 
             if (myId.isBlank() || targetEmail.isBlank() || text.isBlank()) return@launch
 
-            val users = listOf(myId, targetEmail).sorted()
-            val matchId = "${users[0]}_${users[1]}"
-
             val msg = ChatMessage(
-                matchId = matchId,
+                matchId = targetEmail,
                 senderId = if (isMe) "ME" else "OTHER",
                 text = text
             )
