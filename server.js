@@ -500,8 +500,42 @@ app.get('/api/chat/:matchId', authenticateToken, async (req, res) => {
 });
 
 app.post('/api/chat/send', authenticateToken, async (req, res) => {
-    try { const item = { matchId: req.body.matchId, messageId: uuidv4(), sender: req.user.email, text: req.body.text || "", imageUrl: req.body.imageUrl || "", timestamp: Date.now() }; await ddb.send(new PutCommand({ TableName: "Messages", Item: item })); res.json({ success: true, message: item }); }
-    catch (e) { res.status(500).json({ error: e.message }); }
+    try {
+        const targetEmail = String(req.body.matchId || "").trim().toLowerCase();
+        const text = String(req.body.text || "");
+
+        if (!targetEmail || !text.trim()) {
+            return res.status(400).json({ error: "Invalid chat message" });
+        }
+
+        const myEmail = req.user.email.trim().toLowerCase();
+
+        const users = [myEmail, targetEmail].sort();
+        const matchId = `${users[0]}_${users[1]}`;
+
+        const item = {
+            matchId,
+            messageId: uuidv4(),
+            sender: myEmail,
+            text,
+            imageUrl: req.body.imageUrl || "",
+            timestamp: Date.now()
+        };
+
+        await ddb.send(new PutCommand({
+            TableName: "Messages",
+            Item: item
+        }));
+
+        res.json({
+            success: true,
+            message: item
+        });
+
+    } catch (e) {
+        console.error("[CHAT SAVE FAIL]:", e);
+        res.status(500).json({ error: e.message });
+    }
 });
 
 app.get('/api/notifications', authenticateToken, async (req, res) => {
