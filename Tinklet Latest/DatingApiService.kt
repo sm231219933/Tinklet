@@ -26,6 +26,16 @@ data class ReportUserResponse(
     val createdAt: String? = null,
     val error: String? = null
 )
+
+data class MessageRequest(
+    val matchId: String,
+    val senderId: String,
+    val text: String // 'content' ko badal kar 'text' kijiye
+)
+data class ChatSendRequest(
+    val matchId: String,
+    val text: String
+)
 interface DatingApiService {
 
     @POST("api/report")
@@ -57,15 +67,15 @@ interface DatingApiService {
     @POST("messages/send")
     suspend fun sendMessage(@Body request: MessageRequest): Response<Map<String, Any>>
 
-    @GET("messages/{matchId}")
-    suspend fun getMessages(@Path("matchId") matchId: String): Response<List<RemoteMessage>>
 
     @POST("profile/save")
     suspend fun saveProfileSecure(@Body profile: UserProfile): Response<Map<String, Any>>
 
-    @POST("messages/save")
-    suspend fun saveMessageSecure(@Body request: MessageRequest): Response<Map<String, Any>>
+    @POST("api/chat/send")
+    suspend fun saveMessageSecure(@Body request: ChatSendRequest): Response<Map<String, Any>>
 
+    @GET("api/chat/{matchId}")
+    suspend fun getMessages(@Path("matchId") matchId: String): Response<Map<String, Any>>
     @POST("image/upload")
     suspend fun uploadImageSecure(@Body request: ImageUploadRequest): Response<Map<String, String>>
 
@@ -176,7 +186,7 @@ data class LikeResponse(val success: Boolean, val isMatch: Boolean, val matchId:
 data class RespondRequest(val currentUserId: String, val otherUserId: String, val action: String)
 data class LikeItem(val fromUserId: String, val toUserId: String, val type: String, val senderProfile: UserProfile?)
 data class MatchEnriched(val matchId: String, val user1Id: String, val user2Id: String, val otherUser: UserProfile?)
-data class MessageRequest(val matchId: String, val senderId: String, val content: String)
+
 data class RemoteMessage(val matchId: String, val timestamp: Long, val senderId: String, val content: String)
 
 object RetrofitClient {
