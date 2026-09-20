@@ -626,25 +626,47 @@ class DiscoveryViewModel(private val app: Application) : AndroidViewModel(app) {
 
                                 if (!partnerEmail.isNullOrBlank()) {
 
-                                    // Always refresh matched user's real profile from server.
-// Do NOT use old local "Tinklet User, 18" profile first.
-                                    var partnerProfile: UserProfile? = null
-
+                                    // MATCH PROFILE FIX:
+                                    // Use the existing authenticated /profile/{email} endpoint.
+                                    // The old /profile/get endpoint does not exist on the server.
                                     try {
                                         val remoteRes =
-                                            RetrofitClient.apiService.getProfileSecure(
+                                            RetrofitClient.apiService.getProfileByEmail(
                                                 email = partnerEmail
                                             )
 
-                                        if (remoteRes.isSuccessful && remoteRes.body() != null) {
-                                            partnerProfile = remoteRes.body()
-
-                                            if (partnerProfile != null) {
-                                                // Sahi tareeqa: insertProfiles use kijiye aur list bhejiye
-                                                profileDao.insertProfiles(listOf(partnerProfile!!))
+                                        if (remoteRes.isSuccessful) {
+                                            remoteRes.body()?.user?.let { profile ->
+                                                if (!profile.isMe) {
+                                                    profileDao.insertProfiles(
+                                                        listOf(
+                                                            profile.copy(
+                                                                email = partnerEmail,
+                                                                connectionStatus = "ACCEPTED",
+                                                                isMe = false
+                                                            )
+                                                        )
+                                                    )
+                                                }
                                             }
+                                        } else {
+                                            Log.e(
+                                                "CloudSync",
+                                                "Match profile fetch failed: " + partnerEmail +
+                                                    " HTTP " + remoteRes.code()
+                                            )
                                         }
                                     } catch (e: Exception) {
+                                        Log.e(
+                                            "CloudSync",
+                                            "Failed to fetch match profile: $partnerEmail",
+                                            e
+                                        )
+                                    }
+                                }
+                            }
+
+                } catch (e: Exception) {
                                         Log.e(
                                             "CloudSync",
                                             "Failed to fetch match profile: $partnerEmail",
