@@ -1,5 +1,5 @@
 import { FormEvent, useEffect, useMemo, useState } from 'react'
-import { Heart, LogOut, MessageCircle, SlidersHorizontal, Sparkles, UserRound, X } from 'lucide-react'
+import { Heart, LogOut, MessageCircle, SlidersHorizontal, Sparkles, UserRound, X, ChevronLeft, ChevronRight } from 'lucide-react'
 
 type User = {
   id?: string
@@ -12,6 +12,10 @@ type User = {
   secondaryPhotos?: string[]
   country?: string
   state?: string
+  religion?: string
+  habits?: string
+  language?: string
+  intentions?: string
 }
 
 type AuthResponse = { token: string; user: User }
@@ -40,6 +44,12 @@ function App() {
   const [loading, setLoading] = useState(false)
   const [notice, setNotice] = useState('')
   const [view, setView] = useState<'discover' | 'matches'>('discover')
+  const [showFilters, setShowFilters] = useState(false)
+  const [countryFilter, setCountryFilter] = useState('')
+  const [stateFilter, setStateFilter] = useState('')
+  const [genderFilter, setGenderFilter] = useState('')
+  const [ageMin, setAgeMin] = useState(18)
+  const [ageMax, setAgeMax] = useState(60)
 
   useEffect(() => {
     if (!user) return
@@ -48,7 +58,20 @@ function App() {
       .catch(error => setNotice(error.message))
   }, [user])
 
-  const current = useMemo(() => feed[feedIndex], [feed, feedIndex])
+  const filteredFeed = useMemo(() => feed.filter(profile => {
+    const ageOk = !profile.age || (profile.age >= ageMin && profile.age <= ageMax)
+    const countryOk = !countryFilter || (profile.country || '').toLowerCase().includes(countryFilter.toLowerCase())
+    const stateOk = !stateFilter || (profile.state || '').toLowerCase().includes(stateFilter.toLowerCase())
+    const genderOk = !genderFilter || (profile.gender || '').toLowerCase() === genderFilter.toLowerCase()
+    return ageOk && countryOk && stateOk && genderOk
+  }), [feed, ageMin, ageMax, countryFilter, stateFilter, genderFilter])
+
+  const current = filteredFeed[feedIndex]
+
+  function moveCard(direction: 1 | -1) {
+    if (!current) return
+    setFeedIndex(index => Math.max(0, Math.min(index + direction, filteredFeed.length)))
+  }
 
   async function login(event: FormEvent) {
     event.preventDefault()
@@ -84,7 +107,7 @@ function App() {
         method: 'POST',
         body: JSON.stringify({ toUserId: current.id || current.userId, action })
       })
-      setNotice(result.matched ? 'It’s a match! ❤️' : action === 'like' ? 'Like sent' : '')
+      setNotice(result.matched ? 'It’s a match! ❤️' : action === 'like' ? 'Like sent' : action === 'superlike' ? 'Super Like sent' : '')
     } catch (error) {
       setNotice(error instanceof Error ? error.message : 'Could not update this profile')
     } finally {
@@ -106,10 +129,7 @@ function App() {
             {loginError && <div className="error">{loginError}</div>}
             <button className="primary" disabled={loading}>{loading ? 'Logging in…' : 'Login'}</button>
           </form>
-          <div className="signup-note">
-            <Sparkles size={17} />
-            <span>New accounts are created in the Tinklet Android app.</span>
-          </div>
+          <div className="signup-note"><Sparkles size={17} /><span>New accounts are created in the Tinklet Android app.</span></div>
           <p className="small">Website login only · No website registration</p>
         </section>
       </main>
@@ -130,7 +150,7 @@ function App() {
       <section className="content">
         <div className="welcome-row">
           <div><p className="eyebrow">Welcome back</p><h1>{user.name || user.email || 'Tinklet member'}</h1></div>
-          <button className="filter-button"><SlidersHorizontal size={18}/> Filters</button>
+          <button className="filter-button" onClick={() => setShowFilters(true)}><SlidersHorizontal size={18}/> Filters</button>
         </div>
 
         {view === 'matches' ? (
@@ -140,15 +160,24 @@ function App() {
             <article className="profile-card">
               <div className="photo-wrap">
                 {current.photoUri ? <img src={current.photoUri} alt={current.name || 'Profile'} /> : <div className="photo-placeholder"><UserRound size={76}/></div>}
+
+                <div className="top-gradient" />
+                <div className="bottom-gradient" />
+
+                <div className="profile-top">
+                  <h2>{current.name || 'Tinklet member'}{current.age ? `, ${current.age}` : ''}</h2>
+                  {(current.state || current.country) && <p>📍 {[current.state, current.country].filter(Boolean).join(', ')}</p>}
+                </div>
+
                 <div className="online-pill">● Online</div>
-              </div>
-              <div className="profile-info">
-                <h2>{current.name || 'Tinklet member'}{current.age ? <span>, {current.age}</span> : null}</h2>
-                {(current.state || current.country) && <p>{[current.state, current.country].filter(Boolean).join(', ')}</p>}
-                <div className="profile-actions">
-                  <button className="round dislike" onClick={() => swipe('dislike')}><X size={25}/></button>
-                  <button className="round super" onClick={() => swipe('superlike')}><Sparkles size={23}/></button>
-                  <button className="round like" onClick={() => swipe('like')}><Heart size={25} fill="currentColor"/></button>
+
+                <button className="photo-arrow left" onClick={() => moveCard(-1)} aria-label="Previous profile"><ChevronLeft size={28}/></button>
+                <button className="photo-arrow right" onClick={() => moveCard(1)} aria-label="Next profile"><ChevronRight size={28}/></button>
+
+                <div className="profile-actions overlay-actions">
+                  <button className="round dislike" onClick={() => swipe('dislike')} aria-label="Dislike"><X size={27}/></button>
+                  <button className="round super" onClick={() => swipe('superlike')} aria-label="Super Like"><Sparkles size={25}/></button>
+                  <button className="round like" onClick={() => swipe('like')} aria-label="Like"><Heart size={27} fill="currentColor"/></button>
                 </div>
               </div>
             </article>
@@ -156,8 +185,39 @@ function App() {
         ) : (
           <div className="empty-panel"><Heart size={42}/><h2>No more profiles</h2><p>Check back later for more people.</p></div>
         )}
+
         {notice && <button className="notice" onClick={() => setNotice('')}>{notice}</button>}
       </section>
+
+      {showFilters && (
+        <div className="filter-backdrop" onClick={() => setShowFilters(false)}>
+          <section className="filter-modal" onClick={e => e.stopPropagation()}>
+            <div className="filter-head">
+              <div><p className="eyebrow">Discover</p><h2>Filters</h2></div>
+              <button className="icon-button" onClick={() => setShowFilters(false)}><X size={20}/></button>
+            </div>
+
+            <label>Country<input value={countryFilter} onChange={e => setCountryFilter(e.target.value)} placeholder="Any country" /></label>
+            <label>State<input value={stateFilter} onChange={e => setStateFilter(e.target.value)} placeholder="Any state" /></label>
+
+            <label>Gender
+              <select value={genderFilter} onChange={e => setGenderFilter(e.target.value)}>
+                <option value="">Any gender</option>
+                <option value="Male">Male</option>
+                <option value="Female">Female</option>
+                <option value="Neutral">Neutral</option>
+              </select>
+            </label>
+
+            <div className="age-row">
+              <label>Min age<input type="number" min="18" max={ageMax} value={ageMin} onChange={e => setAgeMin(Number(e.target.value))} /></label>
+              <label>Max age<input type="number" min={ageMin} max="100" value={ageMax} onChange={e => setAgeMax(Number(e.target.value))} /></label>
+            </div>
+
+            <button className="primary" onClick={() => { setFeedIndex(0); setShowFilters(false) }}>Apply Filters</button>
+          </section>
+        </div>
+      )}
     </main>
   )
 }
