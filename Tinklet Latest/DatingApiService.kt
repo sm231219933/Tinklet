@@ -97,6 +97,9 @@ interface DatingApiService {
     @POST("fcm/token")
     suspend fun updateFcmToken(@Body request: FcmTokenRequest): Response<Map<String, Any>>
 
+    @GET("profile/{email}")
+    suspend fun getProfileByEmail(@Path("email") email: String): Response<ProfileEnvelope>
+
     @GET("profile/get")
     suspend fun getProfileSecure(@Query("email") email: String): Response<UserProfile>
 
@@ -165,6 +168,7 @@ data class SignupRequest(
 )
 data class LoginRequest(val email: String, val password: String)
 data class AuthResponse(val token: String, val user: UserProfile)
+data class ProfileEnvelope(val user: UserProfile? = null)
 data class SwipeActionRequest(val toUserId: String, val action: String)
 data class SwipeActionResponse(
     val success: Boolean,
