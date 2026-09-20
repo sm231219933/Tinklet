@@ -629,32 +629,30 @@ class DiscoveryViewModel(private val app: Application) : AndroidViewModel(app) {
 
                                 if (!partnerEmail.isNullOrBlank()) {
 
-                                    // MATCH PROFILE MUST COME FROM SERVER AFTER EVERY LOGIN.
-                                    // Do not trust an old local Room profile here because it may
-                                    // contain the fallback "Tinklet User" / age 18 profile.
+                                    // Always refresh matched user's real profile from server.
+// Do NOT use old local "Tinklet User, 18" profile first.
                                     var partnerProfile: UserProfile? = null
 
                                     try {
                                         val remoteRes =
-                                            RetrofitClient.apiService.getProfileByEmail(
+                                            RetrofitClient.apiService.getProfileSecure(
                                                 email = partnerEmail
                                             )
 
-                                        if (remoteRes.isSuccessful) {
-                                            partnerProfile = remoteRes.body()?.user
+                                        if (remoteRes.isSuccessful && remoteRes.body() != null) {
+                                            partnerProfile = remoteRes.body()
                                         }
                                     } catch (e: Exception) {
                                         Log.e(
                                             "CloudSync",
-                                            "Failed to refresh match profile: $partnerEmail",
+                                            "Failed to fetch match profile: $partnerEmail",
                                             e
                                         )
                                     }
 
-                                    // Only use local data if the server profile could not be fetched.
+// Only use Room as fallback if server profile is unavailable.
                                     if (partnerProfile == null) {
-                                        partnerProfile =
-                                            profileDao.getProfileByEmail(partnerEmail)
+                                        partnerProfile = profileDao.getProfileByEmail(partnerEmail)
                                     }
 
                                     val profile = partnerProfile
