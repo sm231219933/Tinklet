@@ -434,8 +434,10 @@ fun ChatScreen(
                     } else {
                         IconButton(
                             onClick = {
-                                onSendMessage(textState)
-                                textState = ""
+                                val message = textState.trim()
+                                if (message.isNotEmpty()) {
+                                    onSendMessage(message)
+                                }
                             },
                             modifier = Modifier.background(Color(0xFFFE3C72), CircleShape)
                         ) {
