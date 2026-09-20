@@ -514,13 +514,13 @@ app.post('/api/chat/send', authenticateToken, async (req, res) => {
         const matchId = `${users[0]}_${users[1]}`;
 
         const item = {
-            matchId,
-            messageId: uuidv4(),
-            sender: myEmail,
-            text,
-            imageUrl: req.body.imageUrl || "",
-            timestamp: Date.now()
-        };
+    matchId,
+    messageId: uuidv4(),
+    sender: myEmail,
+    text,
+    imageUrl: req.body.imageUrl || "",
+    timestamp: String(Date.now())
+};
 
         await ddb.send(new PutCommand({
             TableName: "Messages",
@@ -579,24 +579,28 @@ io.on('connection', (socket) => {
            const users = [fromUserId, toUserId].sort();
 const matchId = `${users[0]}_${users[1]}`;
 
+const users = [fromUserId, toUserId].sort();
+const matchId = `${users[0]}_${users[1]}`;
+
 const item = { 
     matchId: matchId,
     messageId: messageId,
     sender: fromUserId,
     text: text,
-    timestamp: Date.now() 
+    timestamp: String(Date.now())
 };
 
             // Database me save karo
-            await ddb.send(new PutCommand({ TableName: "Messages", Item: item }));
+            await ddb.send(new PutCommand({ 
+    TableName: "Messages", 
+    Item: item 
+}));
 
-            // Samne wale ko real-time bhej do
-            io.to(toUserId).emit('chat:message', {
+io.to(toUserId).emit('chat:message', {
     fromUserId: fromUserId,
-    toUserId: toUserId,
     text: text,
     messageId: messageId,
-    timestamp: item.timestamp
+    timestamp: Number(item.timestamp)
 });
         } catch (e) { console.error('Socket chat error:', e.message); }
     });
