@@ -629,30 +629,32 @@ class DiscoveryViewModel(private val app: Application) : AndroidViewModel(app) {
 
                                 if (!partnerEmail.isNullOrBlank()) {
 
-                                    var partnerProfile =
-                                        profileDao.getProfileByEmail(partnerEmail)
+                                    // MATCH PROFILE MUST COME FROM SERVER AFTER EVERY LOGIN.
+                                    // Do not trust an old local Room profile here because it may
+                                    // contain the fallback "Tinklet User" / age 18 profile.
+                                    var partnerProfile: UserProfile? = null
 
-                                    if (partnerProfile == null) {
-                                        try {
-                                            val remoteRes =
-                                                RetrofitClient.apiService.getProfileSecure(
-                                                    email = partnerEmail
-                                                )
-
-                                            if (
-                                                remoteRes.isSuccessful &&
-                                                remoteRes.body() != null
-                                            ) {
-                                                partnerProfile = remoteRes.body()
-                                            }
-
-                                        } catch (e: Exception) {
-                                            Log.e(
-                                                "CloudSync",
-                                                "Failed to fetch match profile: $partnerEmail",
-                                                e
+                                    try {
+                                        val remoteRes =
+                                            RetrofitClient.apiService.getProfileByEmail(
+                                                email = partnerEmail
                                             )
+
+                                        if (remoteRes.isSuccessful) {
+                                            partnerProfile = remoteRes.body()?.user
                                         }
+                                    } catch (e: Exception) {
+                                        Log.e(
+                                            "CloudSync",
+                                            "Failed to refresh match profile: $partnerEmail",
+                                            e
+                                        )
+                                    }
+
+                                    // Only use local data if the server profile could not be fetched.
+                                    if (partnerProfile == null) {
+                                        partnerProfile =
+                                            profileDao.getProfileByEmail(partnerEmail)
                                     }
 
                                     val profile = partnerProfile
