@@ -634,18 +634,25 @@ class DiscoveryViewModel(private val app: Application) : AndroidViewModel(app) {
                                     var partnerProfile: UserProfile? = null
 
                                     try {
+                                        // Always load the complete real profile for matches.
                                         val remoteRes =
-                                            RetrofitClient.apiService.getProfileSecure(
+                                            RetrofitClient.apiService.getProfileByEmail(
                                                 email = partnerEmail
                                             )
 
-                                        if (remoteRes.isSuccessful && remoteRes.body() != null) {
-                                            partnerProfile = remoteRes.body()
+                                        if (remoteRes.isSuccessful) {
+                                            partnerProfile = remoteRes.body()?.user
                                         }
+
+                                        Log.d(
+                                            "CloudSync",
+                                            "MATCH PROFILE: email=$"+"partnerEmail, name=$"+"{partnerProfile?.name}, " +
+                                                "age=$"+"{partnerProfile?.age}, photo=$"+"{partnerProfile?.photoUri}"
+                                        )
                                     } catch (e: Exception) {
                                         Log.e(
                                             "CloudSync",
-                                            "Failed to fetch match profile: $partnerEmail",
+                                            "Failed to fetch match profile: $"+"partnerEmail",
                                             e
                                         )
                                     }
