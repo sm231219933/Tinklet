@@ -1928,10 +1928,9 @@ class DiscoveryViewModel(private val app: Application) : AndroidViewModel(app) {
             try {
                 // Save message on server
                 RetrofitClient.apiService.saveMessageSecure(
-                    request = MessageRequest(
-                        targetEmail,
-                        myId,
-                        text
+                    request = ChatSendRequest(
+                        matchId = targetEmail,
+                        text = text
                     )
                 )
 
