@@ -449,10 +449,7 @@ class DiscoveryViewModel(private val app: Application) : AndroidViewModel(app) {
 
                                 if (localProfile == null) {
                                     try {
-                                        val remoteRes =
-                                            RetrofitClient.apiService.getProfilePublic(
-                                                email = targetEmail
-                                            )
+                                        val remoteRes = RetrofitClient.apiService.getProfileSecure(email = targetEmail)
 
                                         if (remoteRes.isSuccessful && remoteRes.body() != null) {
                                             localProfile = remoteRes.body()
@@ -634,25 +631,23 @@ class DiscoveryViewModel(private val app: Application) : AndroidViewModel(app) {
                                     var partnerProfile: UserProfile? = null
 
                                     try {
-                                        // Always load the complete real profile for matches.
                                         val remoteRes =
-                                            RetrofitClient.apiService.getProfileByEmail(
+                                            RetrofitClient.apiService.getProfileSecure(
                                                 email = partnerEmail
                                             )
 
-                                        if (remoteRes.isSuccessful) {
-                                            partnerProfile = remoteRes.body()?.user
-                                        }
+                                        if (remoteRes.isSuccessful && remoteRes.body() != null) {
+                                            partnerProfile = remoteRes.body()
 
-                                        Log.d(
-                                            "CloudSync",
-                                            "MATCH PROFILE: email=$"+"partnerEmail, name=$"+"{partnerProfile?.name}, " +
-                                                "age=$"+"{partnerProfile?.age}, photo=$"+"{partnerProfile?.photoUri}"
-                                        )
+                                            if (partnerProfile != null) {
+                                                // Sahi tareeqa: insertProfiles use kijiye aur list bhejiye
+                                                profileDao.insertProfiles(listOf(partnerProfile!!))
+                                            }
+                                        }
                                     } catch (e: Exception) {
                                         Log.e(
                                             "CloudSync",
-                                            "Failed to fetch match profile: $"+"partnerEmail",
+                                            "Failed to fetch match profile: $partnerEmail",
                                             e
                                         )
                                     }
