@@ -271,7 +271,7 @@ class DiscoveryViewModel(private val app: Application) : AndroidViewModel(app) {
         if (userId.isBlank()) return
         
         Log.d("Signaling_Trace", "Initializing Socket.io Signaling for $userId")
-        signaling = SignalingClient("http://15.206.14.213:3000", userId, object : SignalingClient.SignalingListener {
+        signaling = SignalingClient("http://15.206.14.213:4000", userId, object : SignalingClient.SignalingListener {
             override fun onIncomingCall(fromUserId: String, fromUserName: String, offer: String, callType: String) {
                 Log.d("Signaling_Trace", "INCOMING CALL EVENT from $fromUserId")
                 
@@ -299,21 +299,23 @@ class DiscoveryViewModel(private val app: Application) : AndroidViewModel(app) {
             override fun onIceCandidateReceived(candidate: String) {}
             override fun onChatMessageReceived(fromUserId: String, text: String, messageId: String?) {
                 viewModelScope.launch {
+                    // Strict mapping: incoming message ka matchId bhejnewale ki email honi chahiye
+                    // Sahi tareeqa: messageId ko pehle fix karein phir object banayein
+                    val finalMessageId = messageId ?: java.util.UUID.randomUUID().toString()
+
                     val msg = ChatMessage(
-                        matchId = fromUserId, 
-                        senderId = "OTHER", 
-                        text = text, 
-                        messageId = messageId ?: java.util.UUID.randomUUID().toString(),
+                        matchId = fromUserId,
+                        senderId = "OTHER",
+                        text = text,
+                        messageId = finalMessageId, // Correct assignment
                         status = "DELIVERED"
                     )
                     chatMessageDao.insertMessage(msg)
-                    
-                    // Send Delivery Receipt
-                    messageId?.let { signaling?.sendDeliveryReceipt(fromUserId, it) }
 
-                    // Show notification
-                    val senderName = profileDao.getProfileByEmail(fromUserId)?.name ?: "New Message"
-                    NotificationHelper.showMessageNotification(app, senderName, text, fromUserId)
+
+                    // Notification show karein
+                    val senderProfile = profileDao.getProfileByEmail(fromUserId)
+                    NotificationHelper.showMessageNotification(app, senderProfile?.name ?: "New Message", text, fromUserId)
                 }
             }
             override fun onMessageDelivered(fromUserId: String, messageId: String) {
@@ -438,7 +440,30 @@ class DiscoveryViewModel(private val app: Application) : AndroidViewModel(app) {
 
                                 // Server /api/sync/all already sends the sender's real profile.
 // Use that profile first so the actual name is preserved.
-                                var localProfile: UserProfile? = profileDao.getProfileByEmail(targetEmail)
+                                var localProfile: UserProfile? = record.profile
+
+                                if (localProfile == null) {
+                                    localProfile = profileDao.getProfileByEmail(targetEmail)
+                                }
+
+                                if (localProfile == null) {
+                                    try {
+                                        val remoteRes =
+                                            RetrofitClient.apiService.getProfilePublic(
+                                                email = targetEmail
+                                            )
+
+                                        if (remoteRes.isSuccessful && remoteRes.body() != null) {
+                                            localProfile = remoteRes.body()
+                                        }
+                                    } catch (e: Exception) {
+                                        Log.e(
+                                            "CloudSync",
+                                            "Failed to fetch sent profile: $targetEmail",
+                                            e
+                                        )
+                                    }
+                                }
 
 // Fallback only if server did not include the profile.
                                 if (localProfile == null) {
@@ -1880,20 +1905,48 @@ class DiscoveryViewModel(private val app: Application) : AndroidViewModel(app) {
     private fun seedMockData() {
         // Test profiles disabled as per user request to focus on real data
     }
-    fun getMessages(email: String): Flow<List<ChatMessage>> = chatMessageDao.getMessagesForMatch(email).map { it.reversed() }
-    fun sendMessage(partnerEmail: String, text: String, isMe: Boolean = true) { 
-        viewModelScope.launch { 
-            val myId = _currentUser.value?.email ?: ""
-            if (myId.isBlank()) return@launch
+    fun getMessages(email: String): Flow<List<ChatMessage>> {
+        val partnerEmail = email.trim().lowercase()
+        return chatMessageDao.getMessagesForMatch(partnerEmail).map { it.reversed() }
+    }
+    fun sendMessage(partnerEmail: String, text: String, isMe: Boolean = true) {
+        viewModelScope.launch {
+            val myId = _currentUser.value?.email?.trim()?.lowercase() ?: ""
+            val targetEmail = partnerEmail.trim().lowercase()
 
-            val msg = ChatMessage(matchId = partnerEmail, senderId = if(isMe) "ME" else "OTHER", text = text)
+            if (myId.isBlank() || targetEmail.isBlank() || text.isBlank()) return@launch
+
+            val msg = ChatMessage(
+                matchId = targetEmail,
+                senderId = if (isMe) "ME" else "OTHER",
+                text = text
+            )
+
+            // Save locally first so sender immediately sees the message
             chatMessageDao.insertMessage(msg)
 
             try {
-                RetrofitClient.apiService.saveMessageSecure(request = MessageRequest(partnerEmail, myId, text))
-                signaling?.sendSignal(partnerEmail, "chat_message", sdp = text, messageId = msg.messageId)
-            } catch (e: Exception) { Log.e("DiscoveryViewModel", "Cloud save fail") }
-        } 
+                // Save message on server
+                RetrofitClient.apiService.saveMessageSecure(
+                    request = MessageRequest(
+                        targetEmail,
+                        myId,
+                        text
+                    )
+                )
+
+                // Send real-time message to the other user
+                signaling?.sendSignal(
+                    targetEmail,
+                    "chat_message",
+                    sdp = text,
+                    messageId = msg.messageId
+                )
+
+            } catch (e: Exception) {
+                Log.e("DiscoveryViewModel", "Chat message send failed", e)
+            }
+        }
     }
 
     fun markMessagesAsRead(partnerEmail: String) {
