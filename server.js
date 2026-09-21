@@ -219,8 +219,17 @@ incomingRejected: incomingRejected.map(l => ({
     timestamp: l.timestamp || 0,
     profile: profileMap[String(l.fromUserId || "").trim().toLowerCase()] || null
 })),
-
-    matches: (matches.Items || [])
+//01
+        // Naya code purane data (...m) ke saath details extra add kar raha hai
+    matches: (matches.Items || []).map(m => {
+        const partnerEmail = (m.users || []).find(u => String(u).toLowerCase() !== email.toLowerCase());
+        return {
+            ...m, // Isse purana matchId, users, aur timestamp bilkul safe rahega
+            partnerProfile: profileMap[String(partnerEmail || "").toLowerCase()] || null // Extra details add ho gayi
+            //01
+        };
+    })
+});
 });
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
