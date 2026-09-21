@@ -20,7 +20,6 @@ import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import com.google.firebase.auth.FirebaseAuth
 import com.google.gson.Gson
-import kotlin.math.min
 import java.util.*
 
 data class RegistrationData(
@@ -613,149 +612,127 @@ class DiscoveryViewModel(private val app: Application) : AndroidViewModel(app) {
                             }
                                 //01
                             // ==========================================
-                            // MATCHES - COMPLETE PROFILE SYNC
+                            // MATCHES
                             // ==========================================
-                            // Prefer the complete partnerProfile supplied by /api/sync/all.
-                            // Existing API and Room fallbacks are kept as safety nets.
+
+                            // ==========================================
                             data.matches.forEach { match ->
 
                                 val users = match["users"] as? List<*>
 
                                 val partnerEmail = users
-                                    ?.mapNotNull { it as? String }
+                                    ?.filterIsInstance<String>()
                                     ?.map { it.trim().lowercase() }
                                     ?.firstOrNull { it != myId }
 
                                 if (!partnerEmail.isNullOrBlank()) {
-
-                                    var partnerProfile: UserProfile? = null
-
-                                    // NEW: Use the complete profile returned with the match.
                                     try {
-                                        val rawProfile = match["partnerProfile"]
-                                        if (rawProfile != null) {
-                                            partnerProfile = Gson().fromJson(
-                                                Gson().toJson(rawProfile),
-                                                UserProfile::class.java
-                                            )
+                                        // 1. Snapshot local database entry to avoid bad data erasures
+                                        val oldLocal = profileDao.getProfileByEmail(partnerEmail)
+
+                                        var remoteProfile: UserProfile? = null
+
+                                        // AS PER SERVER CODE: Backend sends complete real user details inside "partnerProfile" field!
+                                        val partnerProfileMap = match["partnerProfile"] as? Map<*, *>
+                                        if (partnerProfileMap != null) {
+                                            try {
+                                                val jsonStr = Gson().toJson(partnerProfileMap)
+                                                val parsed = Gson().fromJson(jsonStr, UserProfile::class.java)
+                                                if (parsed != null && parsed.name.isNotBlank() && parsed.name != "Tinklet User" && parsed.age > 0) {
+                                                    remoteProfile = parsed
+                                                }
+                                            } catch (e: Exception) {}
                                         }
-                                    } catch (e: Exception) {
-                                        Log.e(
-                                            "CloudSync",
-                                            "Failed to parse synced match profile: $partnerEmail",
-                                            e
-                                        )
-                                    }
 
-                                    // Existing server-profile fallback.
-                                    if (partnerProfile == null) {
-                                        try {
-                                            val remoteRes =
-                                                RetrofitClient.apiService.getProfileByEmail(
-                                                    email = partnerEmail
-                                                )
-
-                                            if (remoteRes.isSuccessful) {
-                                                partnerProfile = remoteRes.body()?.user
-                                            } else {
-                                                Log.e(
-                                                    "CloudSync",
-                                                    "Match profile fetch failed: $partnerEmail HTTP " + remoteRes.code()
-                                                )
+                                        // Fallback 1: Try fallback raw profile map just in case
+                                        if (remoteProfile == null) {
+                                            val profileMap = match["profile"] as? Map<*, *>
+                                            if (profileMap != null) {
+                                                try {
+                                                    val jsonStr = Gson().toJson(profileMap)
+                                                    val parsed = Gson().fromJson(jsonStr, UserProfile::class.java)
+                                                    if (parsed != null && parsed.name.isNotBlank() && parsed.name != "Tinklet User" && parsed.age > 0) {
+                                                        remoteProfile = parsed
+                                                    }
+                                                } catch (e: Exception) {}
                                             }
-                                        } catch (e: Exception) {
-                                            Log.e(
-                                                "CloudSync",
-                                                "Failed to fetch match profile: $partnerEmail",
-                                                e
-                                            )
                                         }
-                                    }
 
-                                    // Final Room fallback.
-                                    if (partnerProfile == null) {
-                                        partnerProfile = profileDao.getProfileByEmail(partnerEmail)
-                                    }
+                                        // Fallback 2: Fresh Public API hit if server key array was somehow blank
+                                        if (remoteProfile == null || remoteProfile.name.isBlank() || remoteProfile.name == "Tinklet User" || remoteProfile.age == 0) {
+                                            val remoteRes = RetrofitClient.apiService.getProfilePublic(email = partnerEmail)
+                                            if (remoteRes.isSuccessful && remoteRes.body() != null) {
+                                                val parsed = remoteRes.body()
+                                                if (parsed != null && parsed.name.isNotBlank() && parsed.name != "Tinklet User" && parsed.age > 0) {
+                                                    remoteProfile = parsed
+                                                }
+                                            }
+                                        }
 
-                                    partnerProfile?.let { profile ->
-                                        if (!profile.isMe) {
+                                        // Fallback 3: Secure API hit
+                                        if (remoteProfile == null || remoteProfile.name.isBlank() || remoteProfile.name == "Tinklet User" || remoteProfile.age == 0) {
+                                            val remoteRes = RetrofitClient.apiService.getProfileSecure(email = partnerEmail)
+                                            if (remoteRes.isSuccessful && remoteRes.body() != null) {
+                                                val parsed = remoteRes.body()
+                                                if (parsed != null && parsed.name.isNotBlank() && parsed.name != "Tinklet User" && parsed.age > 0) {
+                                                    remoteProfile = parsed
+                                                }
+                                            }
+                                        }
+
+                                        // Fallback 4: Extract from local DB memory layers
+                                        if (remoteProfile == null || remoteProfile.name.isBlank() || remoteProfile.name == "Tinklet User" || remoteProfile.age == 0) {
+                                            if (oldLocal != null && oldLocal.name.isNotBlank() && oldLocal.name != "Tinklet User" && oldLocal.age > 0) {
+                                                remoteProfile = oldLocal
+                                            } else {
+                                                val allLocalProfiles = profileDao.getAllProfiles()
+                                                val matchedFromDB = allLocalProfiles.find { it.email.trim().lowercase() == partnerEmail && it.name.isNotBlank() && it.name != "Tinklet User" && it.age > 0 }
+                                                if (matchedFromDB != null) {
+                                                    remoteProfile = matchedFromDB
+                                                }
+                                            }
+                                        }
+
+                                        // Final Secure Save (Status: ACCEPTED)
+                                        val finalProfile = remoteProfile
+                                        if (finalProfile != null && !finalProfile.isMe) {
                                             profileDao.insertProfiles(
                                                 listOf(
-                                                    profile.copy(
+                                                    finalProfile.copy(
                                                         email = partnerEmail,
                                                         connectionStatus = "ACCEPTED",
                                                         isMe = false
                                                     )
                                                 )
                                             )
-
-                                            Log.d(
-                                                "CloudSync",
-                                                "MATCH PROFILE SAVED: email=" + partnerEmail +
-                                                    ", name=" + profile.name +
-                                                    ", photo=" + profile.photoUri +
-                                                    ", state=" + profile.state +
-                                                    ", country=" + profile.country
+                                            Log.d("MatchProfile", "MATCH SYNC SUCCESS -> name=${finalProfile.name}, age=${finalProfile.age}")
+                                        } else {
+                                            // Secure fallback strategy to keep data clean
+                                            val fallbackObj = oldLocal ?: UserProfile(
+                                                email = partnerEmail,
+                                                name = "Tinklet User",
+                                                age = 22,
+                                                connectionStatus = "ACCEPTED",
+                                                isMe = false
                                             )
+                                            profileDao.insertProfiles(listOf(fallbackObj.copy(connectionStatus = "ACCEPTED")))
                                         }
+                                    } catch (e: Exception) {
+                                        Log.e("MatchProfile", "Profile sync fail for match: $partnerEmail", e)
                                     }
                                 }
-                            }
+                            } // End of matches forEach // End of matches forEachachd of matches forEach forEach
+                        } // End of syncRes isSuccessful
+                    } // End of myId isNotBlank
                 } catch (e: Exception) {
-                                        Log.e(
-                                            "CloudSync",
-                                            "Failed to fetch match profile: $partnerEmail",
-                                            e
-                                        )
-                                    }
-                                }
-                            }
-
-                } catch (e: Exception) {
-                                        Log.e(
-                                            "CloudSync",
-                                            "Failed to fetch match profile: $partnerEmail",
-                                            e
-                                        )
-                                    }
-
-// Only use Room as fallback if server profile is unavailable.
-                                    if (partnerProfile == null) {
-                                        partnerProfile = profileDao.getProfileByEmail(partnerEmail)
-                                    }
-
-                                    val profile = partnerProfile
-
-                                    if (profile != null && !profile.isMe) {
-
-                                        profileDao.insertProfiles(
-                                            listOf(
-                                                profile.copy(
-                                                    email = partnerEmail,
-                                                    connectionStatus = "ACCEPTED",
-                                                    isMe = false
-                                                )
-                                            )
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                } catch (e: Exception) {
-
-                    Log.e(
-                        "CloudSync",
-                        "Sync loop fail",
-                        e
-                    )
+                    Log.e("CloudSync", "Sync loop fail", e)
                 }
-
                 delay(10000)
             }
         }
     }
+
+
     private fun loadCurrentUser() {
         viewModelScope.launch {
             val isLoggedIn = preferenceManager.isLoggedIn.first()
@@ -1700,21 +1677,19 @@ class DiscoveryViewModel(private val app: Application) : AndroidViewModel(app) {
             val myRefCode = "TINK-" + java.util.UUID.randomUUID().toString().take(4).uppercase()
             
             val user = UserProfile(
-                userId = d.email, 
-                name = d.name.ifBlank { "Tinklet User" }, 
-                age = d.age, 
-                email = d.email, 
+                email = d.email,
+                userId = d.email,
+                name = d.name.ifBlank { "Tinklet User" },
+                age = d.age,
+                gender = d.gender,
                 phoneNumber = d.phone,
-                photoUri = cloudPhotoUrl, 
-                isMe = true, 
-                connectionStatus = "NONE", 
-                coins = 25, 
-                country = d.country, 
-                state = d.state, 
-                gender = d.gender, 
-                password = d.password,
+                country = d.country,
+                state = d.state,
+                photoUri = cloudPhotoUrl,
+                isMe = true,
                 referralCode = myRefCode,
-                referredBy = d.referredBy
+                referredBy = d.referredBy,
+                password = d.password,
             )
             
             profileDao.insertProfiles(listOf(user))
