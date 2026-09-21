@@ -230,7 +230,6 @@ incomingRejected: incomingRejected.map(l => ({
         };
     })
 });
-});
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
