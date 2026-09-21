@@ -7,32 +7,32 @@ import kotlinx.serialization.Serializable
 @Serializable
 @Entity(tableName = "profiles")
 data class UserProfile(
-    @PrimaryKey val email: String = "", 
-    val userId: String = "", 
+    @PrimaryKey val email: String = "",
+    val userId: String = "",
     val name: String = "",
     val age: Int = 0,
     val gender: String = "",
     val phoneNumber: String = "",
     val country: String = "",
     val state: String = "",
-    val dob: String = "", 
+    val dob: String = "",
     val bio: String = "",
     val photoUri: String = "",
     val secondaryPhotos: List<String> = emptyList(),
     val introVideoUri: String = "",
-    
+
     val height: String = "",
     val religion: String = "",
     val education: String = "",
     val profession: String = "",
-    val diet: String = "", 
-    val habits: String = "", 
+    val diet: String = "",
+    val habits: String = "",
     val language: String = "",
-    val intentions: String = "", 
-    val interests: String = "", 
-    
+    val intentions: String = "",
+    val interests: String = "",
+
     val coins: Int = 25,
-    val boostBid: Int = 0, 
+    val boostBid: Int = 0,
     val boostUntil: Long = 0,
     val isMe: Boolean = false,
     val isPremium: Boolean = false,
@@ -42,7 +42,7 @@ data class UserProfile(
     val deviceId: String = "",
     val badgeType: String = "NONE",
     val badgeExpiry: Long = 0L,
-    
+
     val isDeactivated: Boolean = false,
     val lastGiftReceived: String = "",
     val connectionStatus: String = "NONE",
@@ -51,6 +51,7 @@ data class UserProfile(
     val password: String = "",
     val lastActive: Long = 0,
     val deletionRequestedAt: Long = 0,
-    
-    val interactions: Map<String, String> = emptyMap()
+
+   val interactions: Map<String, String> = emptyMap(),
+  //  val remoteRes:
 )
