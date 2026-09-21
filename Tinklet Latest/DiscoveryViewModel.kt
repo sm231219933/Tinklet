@@ -613,8 +613,10 @@ class DiscoveryViewModel(private val app: Application) : AndroidViewModel(app) {
                             }
                                 //01
                             // ==========================================
-                            // MATCHES
+                            // MATCHES - COMPLETE PROFILE SYNC
                             // ==========================================
+                            // Prefer the complete partnerProfile supplied by /api/sync/all.
+                            // Existing API and Room fallbacks are kept as safety nets.
                             data.matches.forEach { match ->
 
                                 val users = match["users"] as? List<*>
@@ -626,37 +628,80 @@ class DiscoveryViewModel(private val app: Application) : AndroidViewModel(app) {
 
                                 if (!partnerEmail.isNullOrBlank()) {
 
-                                    // MATCH PROFILE FIX:
-                                    // Use the existing authenticated /profile/{email} endpoint.
-                                    // The old /profile/get endpoint does not exist on the server.
-                                    try {
-                                        val remoteRes =
-                                            RetrofitClient.apiService.getProfileByEmail(
-                                                email = partnerEmail
-                                            )
+                                    var partnerProfile: UserProfile? = null
 
-                                        if (remoteRes.isSuccessful) {
-                                            remoteRes.body()?.user?.let { profile ->
-                                                if (!profile.isMe) {
-                                                    profileDao.insertProfiles(
-                                                        listOf(
-                                                            profile.copy(
-                                                                email = partnerEmail,
-                                                                connectionStatus = "ACCEPTED",
-                                                                isMe = false
-                                                            )
-                                                        )
-                                                    )
-                                                }
-                                            }
-                                        } else {
-                                            Log.e(
-                                                "CloudSync",
-                                                "Match profile fetch failed: " + partnerEmail +
-                                                    " HTTP " + remoteRes.code()
+                                    // NEW: Use the complete profile returned with the match.
+                                    try {
+                                        val rawProfile = match["partnerProfile"]
+                                        if (rawProfile != null) {
+                                            partnerProfile = Gson().fromJson(
+                                                Gson().toJson(rawProfile),
+                                                UserProfile::class.java
                                             )
                                         }
                                     } catch (e: Exception) {
+                                        Log.e(
+                                            "CloudSync",
+                                            "Failed to parse synced match profile: $partnerEmail",
+                                            e
+                                        )
+                                    }
+
+                                    // Existing server-profile fallback.
+                                    if (partnerProfile == null) {
+                                        try {
+                                            val remoteRes =
+                                                RetrofitClient.apiService.getProfileByEmail(
+                                                    email = partnerEmail
+                                                )
+
+                                            if (remoteRes.isSuccessful) {
+                                                partnerProfile = remoteRes.body()?.user
+                                            } else {
+                                                Log.e(
+                                                    "CloudSync",
+                                                    "Match profile fetch failed: $partnerEmail HTTP " + remoteRes.code()
+                                                )
+                                            }
+                                        } catch (e: Exception) {
+                                            Log.e(
+                                                "CloudSync",
+                                                "Failed to fetch match profile: $partnerEmail",
+                                                e
+                                            )
+                                        }
+                                    }
+
+                                    // Final Room fallback.
+                                    if (partnerProfile == null) {
+                                        partnerProfile = profileDao.getProfileByEmail(partnerEmail)
+                                    }
+
+                                    partnerProfile?.let { profile ->
+                                        if (!profile.isMe) {
+                                            profileDao.insertProfiles(
+                                                listOf(
+                                                    profile.copy(
+                                                        email = partnerEmail,
+                                                        connectionStatus = "ACCEPTED",
+                                                        isMe = false
+                                                    )
+                                                )
+                                            )
+
+                                            Log.d(
+                                                "CloudSync",
+                                                "MATCH PROFILE SAVED: email=" + partnerEmail +
+                                                    ", name=" + profile.name +
+                                                    ", photo=" + profile.photoUri +
+                                                    ", state=" + profile.state +
+                                                    ", country=" + profile.country
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                } catch (e: Exception) {
                                         Log.e(
                                             "CloudSync",
                                             "Failed to fetch match profile: $partnerEmail",
