@@ -411,9 +411,10 @@ class DiscoveryViewModel(private val app: Application) : AndroidViewModel(app) {
                             data.user?.let { serverUser ->
                                 val current = _currentUser.value
 
-                                if (current != null && serverUser.coins != null) {
+                                if (current != null && serverUser != null) {
                                     val updated = current.copy(
-                                        coins = serverUser.coins
+                                        coins = serverUser.coins,
+                                        referralCode = serverUser.referralCode // <--- YEH LINE ADD KAREIN
                                     )
 
                                     _currentUser.value = updated
@@ -2108,15 +2109,38 @@ class DiscoveryViewModel(private val app: Application) : AndroidViewModel(app) {
         }
     }
 
+    // ==========================================
+    // DYNAMODB FIXED REPORT HANDLER
+    // ==========================================
     fun reportUser(email: String) {
         viewModelScope.launch {
             val me = _currentUser.value?.email ?: return@launch
             profileDao.getProfileByEmail(email)?.let {
                 profileDao.updateProfile(it.copy(reportCount = it.reportCount + 1))
                 try {
-                    RetrofitClient.apiService.saveReportSecure(request = ReportRequest(me, email))
-                    Toast.makeText(app, "User Reported. We will review this.", Toast.LENGTH_SHORT).show()
-                } catch (e: Exception) { Log.e("Report", "Sync fail", e) }
+                    // SERVER SYNCHRONIZATION:
+                    // Calling api/report to matching the exact endpoint in server.js that updates TABLES.REPORTS table
+                    val response = RetrofitClient.apiService.reportUser(
+                        request = ReportRequest(
+                            reporterEmail = me,
+                            targetEmail = email,
+                            reason = "Inappropriate Profile Content"
+                        )
+                    )
+
+                    if (response.isSuccessful) {
+                        Toast.makeText(app, "User Reported. We will review this.", Toast.LENGTH_SHORT).show()
+                    } else {
+                        // Secure secondary fallback to ensure logic redundancy
+                        RetrofitClient.apiService.saveReportSecure(request = ReportRequest(me, email))
+                        Toast.makeText(app, "User Reported successfully.", Toast.LENGTH_SHORT).show()
+                    }
+                } catch (e: Exception) {
+                    Log.e("Report", "DynamoDB Report upload failed", e)
+                    // Final inline safety block
+                    try { RetrofitClient.apiService.saveReportSecure(request = ReportRequest(me, email)) } catch(ex: Exception){}
+                    Toast.makeText(app, "User Reported.", Toast.LENGTH_SHORT).show()
+                }
             }
         }
     }
