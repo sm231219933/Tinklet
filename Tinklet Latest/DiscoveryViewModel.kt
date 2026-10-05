@@ -1366,9 +1366,27 @@ class DiscoveryViewModel(private val app: Application) : AndroidViewModel(app) {
         }
         finally { _isAuthLoading.value = false }
     }
-    fun setRegistrationData(n: String, a: Int, e: String, p: String, c: String, s: String, g: String, pass: String, ref: String = "") { 
-        _regData.value = RegistrationData(name = n, age = a, email = e, phone = p, country = c, state = s, gender = g, password = pass, referredBy = ref) 
+    fun setRegistrationData(n: String, a: Int, e: String, p: String, c: String, s: String, g: String, pass: String, ref: String = "") {
+        _regData.value = RegistrationData(name = n, age = a, email = e, phone = p, country = c, state = s, gender = g, password = pass, referredBy = ref)
     }
+
+    // --- NAYA FUNCTION COINS ADD KARNE KE LIYE ---
+    fun addCoins(amount: Int) {
+        viewModelScope.launch {
+            val me = _currentUser.value ?: return@launch
+            val updated = me.copy(coins = me.coins + amount)
+            _currentUser.value = updated
+            profileDao.updateProfile(updated)
+            preferenceManager.saveProfileCache(com.google.gson.Gson().toJson(updated))
+            try {
+                RetrofitClient.apiService.saveProfileSecure(profile = updated)
+            } catch (e: Exception) {
+                android.util.Log.e("Coins", "Failed to sync added coins", e)
+            }
+            android.widget.Toast.makeText(app, "$amount Coins Added! 🪙", android.widget.Toast.LENGTH_LONG).show()
+        }
+    }
+    // ---------------------------------------------
 
     fun onAdRewarded() {
         viewModelScope.launch {
@@ -1476,27 +1494,30 @@ class DiscoveryViewModel(private val app: Application) : AndroidViewModel(app) {
         _isFetchingIdentity.value = fetching
     }
 
-    suspend fun checkRegistrationValidity(email: String, phone: String): String? {
+    suspend fun checkRegistrationValidity(email: String, phone: String, checkPhone: Boolean = true): String? {
         _isAuthLoading.value = true
         return try {
-            val response = withTimeout(60000) { 
-                RetrofitClient.apiService.getProfilePublic(email = email) 
+            val response = withTimeout(60000) {
+                RetrofitClient.apiService.getProfilePublic(email = email)
             }
-            if (response.isSuccessful && response.body() != null) return "Email already registered. Please Sign In."
-            
+            if (response.isSuccessful && response.body() != null && response.body()!!.email.isNotBlank()) {
+                return "Email already registered. Please Sign In."
+            }
             // If response is NOT successful and not 404/200-null, it's a real connection/server error
             if (!response.isSuccessful && response.code() != 404) {
-                 return "Server Error (${response.code()}). Check your internet or server."
+                return "Server Error (${response.code()}). Check your internet or server."
             }
 
-            val phoneResponse = withTimeout(60000) { 
-                RetrofitClient.apiService.checkPhoneSecure(phone = phone) 
+            if (checkPhone && phone.isNotBlank()) {
+                val phoneResponse = withTimeout(60000) {
+                    RetrofitClient.apiService.checkPhoneSecure(phone = phone)
+                }
+                if (phoneResponse.isSuccessful && phoneResponse.body()?.get("exists") == true) return "Mobile number already in use."
             }
-            if (phoneResponse.isSuccessful && phoneResponse.body()?.get("exists") == true) return "Mobile number already in use."
             null
-        } catch (e: Exception) { 
+        } catch (e: Exception) {
             Log.e("Auth", "Check fail", e)
-            "Connection Error. Please check your internet or server." 
+            "Connection Error. Please check your internet or server."
         }
         finally { _isAuthLoading.value = false }
     }
@@ -1716,19 +1737,23 @@ class DiscoveryViewModel(private val app: Application) : AndroidViewModel(app) {
             _isAuthLoading.value = false
         }
     }
-    fun onLoginSuccess(name: String?, email: String?, phone: String?, password: String = "") { 
-        _isFetchingIdentity.value = false 
+    fun onLoginSuccess(name: String?, email: String?, phone: String?, password: String = "") {
+        _isFetchingIdentity.value = false
+        val emailStr = email.orEmpty()
+        if (emailStr.isNotBlank()) {
+            _fetchedEmail.value = emailStr
+        }
         _isAuthLoading.value = true
-        viewModelScope.launch { 
+        viewModelScope.launch {
             try {
                 phone?.let { p ->
                     if (p.isNotBlank()) {
-                        val phoneCheckRes = try { 
+                        val phoneCheckRes = try {
                             withTimeout(15000) {
                                 RetrofitClient.apiService.checkPhoneSecure(phone = p)
                             }
                         } catch(e: Exception) { null }
-                        
+
                         if (phoneCheckRes?.isSuccessful == true && phoneCheckRes.body()?.get("exists") == true) {
                             Toast.makeText(app, "Mobile already in use.", Toast.LENGTH_LONG).show()
                             _fetchedPhone.value = ""
@@ -1738,29 +1763,34 @@ class DiscoveryViewModel(private val app: Application) : AndroidViewModel(app) {
                     }
                 }
 
-                val emailStr = email.orEmpty()
                 if (emailStr.isBlank()) return@launch
-                _fetchedEmail.value = emailStr
 
-                val existing = profileDao.getProfileByEmail(emailStr) ?: try { 
-                val res = RetrofitClient.apiService.getProfilePublic(email = emailStr)
-                if (res.isSuccessful) res.body() else null
-            } catch (e: Exception) { null }
-                
-                if (existing != null) { 
+                val existing = profileDao.getProfileByEmail(emailStr) ?: try {
+                    val res = RetrofitClient.apiService.getProfilePublic(email = emailStr)
+                    // Yahan fix kiya gaya hai: res.body() null nahi hona chahiye tabhi account purana maana jayega!
+                    if (res.isSuccessful && res.body() != null && res.body()!!.email.isNotBlank()) res.body() else null
+                } catch (e: Exception) { null }
+
+                if (existing != null && existing.email.isNotBlank()) {
                     if (_isSignUpMode.value) {
-                        Toast.makeText(app, "Account exists. Logging in...", Toast.LENGTH_SHORT).show()
+                        // Agar Account hai, toh proper MainThread pe Toast aaye
+                        withContext(Dispatchers.Main) {
+                            Toast.makeText(app, "Account already exists! Please enter your password to Login.", Toast.LENGTH_LONG).show()
+                        }
+
+                        // UI Mode switch karna taaki user password field dekh sake
                         _isSignUpMode.value = false
+                        return@launch
                     }
 
-                    // REMOVED local password check to trust server/oauth result
+                    // Login Process starts here
                     val me = existing.copy(isMe = true)
                     profileDao.updateProfile(me)
                     _currentUser.value = me
                     preferenceManager.setLoggedIn(true, me.email)
                     refreshFeed()
-                } else { 
-                    _regData.value = RegistrationData(email = emailStr, name = name.orEmpty(), phone = _fetchedPhone.value) 
+                } else {
+                    _regData.value = RegistrationData(email = emailStr, name = name.orEmpty(), phone = _fetchedPhone.value)
                 }
             } finally {
                 _isAuthLoading.value = false
