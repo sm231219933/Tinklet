@@ -108,16 +108,7 @@ app.post('/image/upload', async (req, res) => {
 app.post('/api/auth/signup', async (req, res) => {
     try {
         const email = req.body.email.trim().toLowerCase();
-        // Nayi details add karo jaise deviceId 
-        const newUser = { 
-            ...req.body, 
-            email, 
-            userId: uuidv4(), 
-            coins: 25, 
-            coinInitializedV2: true, 
-            interactions: {}, 
-            createdAt: new Date().toISOString() 
-        };
+        const newUser = { ...req.body, email, userId: uuidv4(), coins: 25, coinInitializedV2: true, interactions: {}, createdAt: new Date().toISOString() };
         await ddb.send(new PutCommand({ TableName: TABLES.USERS, Item: newUser }));
         res.json({ token: jwt.sign({ email }, JWT_SECRET), user: newUser });
     } catch (e) { res.status(500).json({ error: e.message }); }
@@ -469,34 +460,7 @@ app.post('/api/coins/reward', authenticateToken, async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 app.post('/api/referral/credit', authenticateToken, async (req, res) => {
-    try { 
-        const { code, deviceId } = req.body; // Android se deviceId aa rahi hai
-        if (!code || !deviceId) return res.status(400).json({ error: "Missing data" });
-
-        const all = await ddb.send(new ScanCommand({ TableName: TABLES.USERS })); 
-        const referrer = all.Items.find(u => u.referralCode === code); 
-
-        if (referrer) { 
-            // Check karo agar same device ne is referrer ko pehle hi claim kiya hai kya (array of devices)
-            const usedDevices = referrer.referralUsedDevices || [];
-            if (usedDevices.includes(deviceId)) {
-                return res.status(400).json({ error: "Referral already claimed on this device" });
-            }
-
-            // Naye deviceId ko array me add karo
-            usedDevices.push(deviceId);
-
-            await ddb.send(new UpdateCommand({ 
-                TableName: TABLES.USERS, 
-                Key: { email: referrer.email }, 
-                UpdateExpression: "SET coins = if_not_exists(coins, :start) + :b, referralUsedDevices = :ud", 
-                ExpressionAttributeValues: { ":b": 50, ":start": 25, ":ud": usedDevices } 
-            })); 
-            res.json({ success: true }); 
-        } else { 
-            res.status(404).json({ error: "Invalid code" }); 
-        } 
-    }
+    try { const { code } = req.body; const all = await ddb.send(new ScanCommand({ TableName: TABLES.USERS })); const referrer = all.Items.find(u => u.referralCode === code); if (referrer) { await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email: referrer.email }, UpdateExpression: "SET coins = if_not_exists(coins, :start) + :b", ExpressionAttributeValues: { ":b": 50, ":start": 25 } })); res.json({ success: true }); } else { res.status(404).json({ error: "Invalid code" }); } }
     catch (e) { res.status(500).json({ error: e.message }); }
 });
 app.get('/api/swipe/leaderboard', async (req, res) => {
@@ -526,7 +490,7 @@ app.post('/profile/save', authenticateToken, async (req, res) => {
             Key: { email: req.user.email },
 
             UpdateExpression:
-                "SET #name = :name, #u = :u, age = :age, gender = :gender, country = :country, state = :state, photoUri = :photoUri, bio = :bio, secondaryPhotos = :secondaryPhotos, dob = :dob, height = :height, religion = :religion, education = :education, profession = :profession, diet = :diet, habits = :habits, language = :language, introVideoUri = :introVideoUri",
+                "SET #name = :name, #u = :u, age = :age, gender = :gender, country = :country, state = :state, photoUri = :photoUri, bio = :bio, secondaryPhotos = :secondaryPhotos, dob = :dob, height = :height, religion = :religion, education = :education, profession = :profession, diet = :diet, habits = :habits, language = :language, introVideoUri = :introVideoUri, deviceId = :deviceId",
 
             ExpressionAttributeNames: {
                 "#name": "name",
@@ -551,8 +515,8 @@ app.post('/profile/save', authenticateToken, async (req, res) => {
                 ":diet": data.diet || "",
                 ":habits": data.habits || "",
                 ":language": data.language || "",
-                ":introVideoUri": data.introVideoUri || ""
-                ":deviceId": data.deviceId || ""
+                ":introVideoUri": data.introVideoUri || "",
+                ":deviceId": data.deviceId || "" // Android yahan se bhejta hai
             }
         }));
 
