@@ -647,6 +647,68 @@ io.to(toUserId).emit('chat:message', {
     socket.on('call:end', (data) => io.to(String(data.toUserId).toLowerCase()).emit('call:ended', data));
 });
 //01
+// --- NEW CHAT EDIT & DELETE APIS ---
+app.post('/api/chat/edit', authenticateToken, async (req, res) => {
+    try {
+        const { messageId, newText } = req.body;
+        if (!messageId || !newText) return res.status(400).json({ error: "Missing data" });
+
+        // Messages table mein Scan+Update karna padega, ideal Query hai agar matchId/senderId partition key hai toh
+        // Lekin agar primary key sirf messageId hai toh:
+        const scanRes = await ddb.send(new ScanCommand({
+            TableName: "Messages",
+            FilterExpression: "messageId = :mid",
+            ExpressionAttributeValues: { ":mid": messageId }
+        }));
+        
+        if (scanRes.Items && scanRes.Items.length > 0) {
+            const matchId = scanRes.Items[0].matchId;
+            const timestamp = scanRes.Items[0].timestamp; // Sort key
+            
+            await ddb.send(new UpdateCommand({
+                TableName: "Messages",
+                Key: { matchId: matchId, timestamp: timestamp }, // Primary Key structure pe dhyan de
+                UpdateExpression: "SET #t = :nt",
+                ExpressionAttributeNames: { "#t": "text" },
+                ExpressionAttributeValues: { ":nt": newText }
+            }));
+        }
+        res.json({ success: true });
+    } catch (e) {
+        console.error("Edit Chat Fail:", e.message);
+        res.status(500).json({ error: e.message });
+    }
+});
+
+app.post('/api/chat/delete', authenticateToken, async (req, res) => {
+    try {
+        const { messageId } = req.body;
+        if (!messageId) return res.status(400).json({ error: "Missing messageId" });
+
+        const scanRes = await ddb.send(new ScanCommand({
+            TableName: "Messages",
+            FilterExpression: "messageId = :mid",
+            ExpressionAttributeValues: { ":mid": messageId }
+        }));
+        
+        if (scanRes.Items && scanRes.Items.length > 0) {
+            const matchId = scanRes.Items[0].matchId;
+            const timestamp = scanRes.Items[0].timestamp;
+            
+            await ddb.send(new UpdateCommand({
+                TableName: "Messages",
+                Key: { matchId: matchId, timestamp: timestamp },
+                UpdateExpression: "SET #t = :nt",
+                ExpressionAttributeNames: { "#t": "text" },
+                ExpressionAttributeValues: { ":nt": "This message was deleted" }
+            }));
+        }
+        res.json({ success: true });
+    } catch (e) {
+        console.error("Delete Chat Fail:", e.message);
+        res.status(500).json({ error: e.message });
+    }
+});
 
 const PORT = process.env.PORT || 4000;
 masterServer.listen(PORT, '0.0.0.0', () => console.log(`Tinklet API running on port ${PORT}`));
