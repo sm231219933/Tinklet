@@ -550,14 +550,14 @@ app.post('/api/chat/send', authenticateToken, async (req, res) => {
         const users = [myEmail, targetEmail].sort();
         const matchId = `${users[0]}_${users[1]}`;
 
-        const item = {
-    matchId,
-    messageId: uuidv4(),
-    sender: myEmail,
-    text,
-    imageUrl: req.body.imageUrl || "",
-    timestamp: String(Date.now())
-};
+             const item = {
+                 matchId,
+                 messageId: req.body.messageId || uuidv4(), // req.body.messageId waali logic add karni hai
+                 sender: myEmail,
+                 text,
+                 imageUrl: req.body.imageUrl || "",
+                 timestamp: String(Date.now())
+             };
 
         await ddb.send(new PutCommand({
             TableName: "Messages",
