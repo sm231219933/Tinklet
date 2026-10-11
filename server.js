@@ -108,7 +108,16 @@ app.post('/image/upload', async (req, res) => {
 app.post('/api/auth/signup', async (req, res) => {
     try {
         const email = req.body.email.trim().toLowerCase();
-        const newUser = { ...req.body, email, userId: uuidv4(), coins: 25, coinInitializedV2: true, interactions: {}, createdAt: new Date().toISOString() };
+        // Nayi details add karo jaise deviceId 
+        const newUser = { 
+            ...req.body, 
+            email, 
+            userId: uuidv4(), 
+            coins: 25, 
+            coinInitializedV2: true, 
+            interactions: {}, 
+            createdAt: new Date().toISOString() 
+        };
         await ddb.send(new PutCommand({ TableName: TABLES.USERS, Item: newUser }));
         res.json({ token: jwt.sign({ email }, JWT_SECRET), user: newUser });
     } catch (e) { res.status(500).json({ error: e.message }); }
@@ -460,7 +469,34 @@ app.post('/api/coins/reward', authenticateToken, async (req, res) => {
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 app.post('/api/referral/credit', authenticateToken, async (req, res) => {
-    try { const { code } = req.body; const all = await ddb.send(new ScanCommand({ TableName: TABLES.USERS })); const referrer = all.Items.find(u => u.referralCode === code); if (referrer) { await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email: referrer.email }, UpdateExpression: "SET coins = if_not_exists(coins, :start) + :b", ExpressionAttributeValues: { ":b": 50, ":start": 25 } })); res.json({ success: true }); } else { res.status(404).json({ error: "Invalid code" }); } }
+    try { 
+        const { code, deviceId } = req.body; // Android se deviceId aa rahi hai
+        if (!code || !deviceId) return res.status(400).json({ error: "Missing data" });
+
+        const all = await ddb.send(new ScanCommand({ TableName: TABLES.USERS })); 
+        const referrer = all.Items.find(u => u.referralCode === code); 
+
+        if (referrer) { 
+            // Check karo agar same device ne is referrer ko pehle hi claim kiya hai kya (array of devices)
+            const usedDevices = referrer.referralUsedDevices || [];
+            if (usedDevices.includes(deviceId)) {
+                return res.status(400).json({ error: "Referral already claimed on this device" });
+            }
+
+            // Naye deviceId ko array me add karo
+            usedDevices.push(deviceId);
+
+            await ddb.send(new UpdateCommand({ 
+                TableName: TABLES.USERS, 
+                Key: { email: referrer.email }, 
+                UpdateExpression: "SET coins = if_not_exists(coins, :start) + :b, referralUsedDevices = :ud", 
+                ExpressionAttributeValues: { ":b": 50, ":start": 25, ":ud": usedDevices } 
+            })); 
+            res.json({ success: true }); 
+        } else { 
+            res.status(404).json({ error: "Invalid code" }); 
+        } 
+    }
     catch (e) { res.status(500).json({ error: e.message }); }
 });
 app.get('/api/swipe/leaderboard', async (req, res) => {
@@ -516,6 +552,7 @@ app.post('/profile/save', authenticateToken, async (req, res) => {
                 ":habits": data.habits || "",
                 ":language": data.language || "",
                 ":introVideoUri": data.introVideoUri || ""
+                ":deviceId": data.deviceId || ""
             }
         }));
 
@@ -526,6 +563,7 @@ app.post('/profile/save', authenticateToken, async (req, res) => {
         res.status(500).json({ error: e.message });
     }
 });
+
 app.get('/profile/me', authenticateToken, async (req, res) => {
     try { const result = await ddb.send(new GetCommand({ TableName: TABLES.USERS, Key: { email: req.user.email } })); res.json({ user: result.Item }); }
     catch (e) { res.status(500).json({ error: e.message }); }
@@ -657,68 +695,6 @@ io.to(toUserId).emit('chat:message', {
     socket.on('call:end', (data) => io.to(String(data.toUserId).toLowerCase()).emit('call:ended', data));
 });
 //01
-// --- NEW CHAT EDIT & DELETE APIS ---
-app.post('/api/chat/edit', authenticateToken, async (req, res) => {
-    try {
-        const { messageId, newText } = req.body;
-        if (!messageId || !newText) return res.status(400).json({ error: "Missing data" });
-
-        // Messages table mein Scan+Update karna padega, ideal Query hai agar matchId/senderId partition key hai toh
-        // Lekin agar primary key sirf messageId hai toh:
-        const scanRes = await ddb.send(new ScanCommand({
-            TableName: "Messages",
-            FilterExpression: "messageId = :mid",
-            ExpressionAttributeValues: { ":mid": messageId }
-        }));
-        
-        if (scanRes.Items && scanRes.Items.length > 0) {
-            const matchId = scanRes.Items[0].matchId;
-            const timestamp = scanRes.Items[0].timestamp; // Sort key
-            
-            await ddb.send(new UpdateCommand({
-                TableName: "Messages",
-                Key: { matchId: matchId, timestamp: timestamp }, // Primary Key structure pe dhyan de
-                UpdateExpression: "SET #t = :nt",
-                ExpressionAttributeNames: { "#t": "text" },
-                ExpressionAttributeValues: { ":nt": newText }
-            }));
-        }
-        res.json({ success: true });
-    } catch (e) {
-        console.error("Edit Chat Fail:", e.message);
-        res.status(500).json({ error: e.message });
-    }
-});
-
-app.post('/api/chat/delete', authenticateToken, async (req, res) => {
-    try {
-        const { messageId } = req.body;
-        if (!messageId) return res.status(400).json({ error: "Missing messageId" });
-
-        const scanRes = await ddb.send(new ScanCommand({
-            TableName: "Messages",
-            FilterExpression: "messageId = :mid",
-            ExpressionAttributeValues: { ":mid": messageId }
-        }));
-        
-        if (scanRes.Items && scanRes.Items.length > 0) {
-            const matchId = scanRes.Items[0].matchId;
-            const timestamp = scanRes.Items[0].timestamp;
-            
-            await ddb.send(new UpdateCommand({
-                TableName: "Messages",
-                Key: { matchId: matchId, timestamp: timestamp },
-                UpdateExpression: "SET #t = :nt",
-                ExpressionAttributeNames: { "#t": "text" },
-                ExpressionAttributeValues: { ":nt": "This message was deleted" }
-            }));
-        }
-        res.json({ success: true });
-    } catch (e) {
-        console.error("Delete Chat Fail:", e.message);
-        res.status(500).json({ error: e.message });
-    }
-});
 
 const PORT = process.env.PORT || 4000;
 masterServer.listen(PORT, '0.0.0.0', () => console.log(`Tinklet API running on port ${PORT}`));
