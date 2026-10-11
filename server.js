@@ -489,12 +489,15 @@ app.post('/profile/save', authenticateToken, async (req, res) => {
             TableName: TABLES.USERS,
             Key: { email: req.user.email },
 
+            // Dhyan de: state ko #st aur language ko #lang likha gaya hai taaki DynamoDB crash na ho
             UpdateExpression:
-                "SET #name = :name, #u = :u, age = :age, gender = :gender, country = :country, state = :state, photoUri = :photoUri, bio = :bio, secondaryPhotos = :secondaryPhotos, dob = :dob, height = :height, religion = :religion, education = :education, profession = :profession, diet = :diet, habits = :habits, language = :language, introVideoUri = :introVideoUri, deviceId = :deviceId",
+                "SET #name = :name, #u = :u, age = :age, gender = :gender, country = :country, #st = :state, photoUri = :photoUri, bio = :bio, secondaryPhotos = :secondaryPhotos, dob = :dob, height = :height, religion = :religion, education = :education, profession = :profession, diet = :diet, habits = :habits, #lang = :language, introVideoUri = :introVideoUri, deviceId = :deviceId",
 
             ExpressionAttributeNames: {
                 "#name": "name",
-                "#u": "username"
+                "#u": "username",
+                "#st": "state",
+                "#lang": "language"
             },
 
             ExpressionAttributeValues: {
@@ -516,17 +519,18 @@ app.post('/profile/save', authenticateToken, async (req, res) => {
                 ":habits": data.habits || "",
                 ":language": data.language || "",
                 ":introVideoUri": data.introVideoUri || "",
-                ":deviceId": data.deviceId || "" // Android yahan se bhejta hai
+                ":deviceId": data.deviceId || ""
             }
         }));
 
         res.json({ success: true });
     }
     catch (e) {
-        console.error("Profile Save Error:", e.message);
+        console.error("Profile Save Error:", e.name, e.message);
         res.status(500).json({ error: e.message });
     }
 });
+
 
 app.get('/profile/me', authenticateToken, async (req, res) => {
     try { const result = await ddb.send(new GetCommand({ TableName: TABLES.USERS, Key: { email: req.user.email } })); res.json({ user: result.Item }); }
