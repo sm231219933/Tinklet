@@ -1,5 +1,3 @@
-
-
 require('dotenv').config({ path: __dirname + '/.env' });
 const express = require('express');
 const http = require('http');
@@ -232,6 +230,7 @@ incomingRejected: incomingRejected.map(l => ({
         };
     })
 });
+});
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -406,13 +405,13 @@ if (action === "LIKE" || action === "SUPERLIKE") {
        if (action === "REJECTED") {
     // Sirf humare interactions me targets ko REJECTED mark karo
     await setInteractionStatus(fromEmail, toUserId, "REJECTED");
-    
+
     // Likes table me entry dalo ki maine isko reject kiya hai
     await ddb.send(new PutCommand({
         TableName: TABLES.LIKES,
         Item: { fromUserId: fromEmail, toUserId: toUserId, action: "REJECTED", timestamp: Date.now() }
     }));
-    
+
     return res.json({ success: true, matched: false, coins: coinUpdate.Attributes.coins });
 } // 01
 
@@ -589,7 +588,7 @@ io.on('connection', (socket) => {
            const users = [fromUserId, toUserId].sort();
 const matchId = `${users[0]}_${users[1]}`;
 
-const item = { 
+const item = {
     matchId: matchId,
     messageId: messageId,
     sender: fromUserId,
@@ -598,9 +597,9 @@ const item = {
 };
 
             // Database me save karo
-            await ddb.send(new PutCommand({ 
-    TableName: "Messages", 
-    Item: item 
+            await ddb.send(new PutCommand({
+    TableName: "Messages",
+    Item: item
 }));
 
 io.to(toUserId).emit('chat:message', {
