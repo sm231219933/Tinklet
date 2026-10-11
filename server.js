@@ -490,7 +490,7 @@ app.post('/profile/save', authenticateToken, async (req, res) => {
             Key: { email: req.user.email },
 
             UpdateExpression:
-                "SET #name = :name, #u = :u, age = :age, gender = :gender, country = :country, state = :state, photoUri = :photoUri, bio = :bio",
+                "SET #name = :name, #u = :u, age = :age, gender = :gender, country = :country, state = :state, photoUri = :photoUri, bio = :bio, secondaryPhotos = :secondaryPhotos, dob = :dob, height = :height, religion = :religion, education = :education, profession = :profession, diet = :diet, habits = :habits, language = :language, introVideoUri = :introVideoUri",
 
             ExpressionAttributeNames: {
                 "#name": "name",
@@ -500,22 +500,32 @@ app.post('/profile/save', authenticateToken, async (req, res) => {
             ExpressionAttributeValues: {
                 ":name": data.name || "",
                 ":u": data.username || "",
-                ":age": data.age,
-                ":gender": data.gender,
-                ":country": data.country,
-                ":state": data.state,
+                ":age": data.age || 0,
+                ":gender": data.gender || "",
+                ":country": data.country || "",
+                ":state": data.state || "",
                 ":photoUri": data.photoUri || "",
-                ":bio": data.bio || ""
+                ":bio": data.bio || "",
+                ":secondaryPhotos": data.secondaryPhotos || [],
+                ":dob": data.dob || "",
+                ":height": data.height || "",
+                ":religion": data.religion || "",
+                ":education": data.education || "",
+                ":profession": data.profession || "",
+                ":diet": data.diet || "",
+                ":habits": data.habits || "",
+                ":language": data.language || "",
+                ":introVideoUri": data.introVideoUri || ""
             }
         }));
 
         res.json({ success: true });
     }
     catch (e) {
+        console.error("Profile Save Error:", e.message);
         res.status(500).json({ error: e.message });
     }
 });
-
 app.get('/profile/me', authenticateToken, async (req, res) => {
     try { const result = await ddb.send(new GetCommand({ TableName: TABLES.USERS, Key: { email: req.user.email } })); res.json({ user: result.Item }); }
     catch (e) { res.status(500).json({ error: e.message }); }
