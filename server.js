@@ -84,10 +84,10 @@ app.get('/profile/get', authenticateToken, async (req, res) => {
 app.get('/phone/check', async (req, res) => {
     try {
         const phone = req.query.phone || "";
-        const result = await ddb.send(new ScanCommand({ 
-            TableName: TABLES.USERS, 
-            FilterExpression: "phoneNumber = :p", 
-            ExpressionAttributeValues: { ":p": phone } 
+        const result = await ddb.send(new ScanCommand({
+            TableName: TABLES.USERS,
+            FilterExpression: "phoneNumber = :p",
+            ExpressionAttributeValues: { ":p": phone }
         }));
         res.json({ exists: result.Count > 0 });
     } catch (e) { res.status(500).json({ error: e.message }); }
@@ -433,13 +433,13 @@ if (action === "LIKE" || action === "SUPERLIKE") {
        if (action === "REJECTED") {
     // Sirf humare interactions me targets ko REJECTED mark karo
     await setInteractionStatus(fromEmail, toUserId, "REJECTED");
-    
+
     // Likes table me entry dalo ki maine isko reject kiya hai
     await ddb.send(new PutCommand({
         TableName: TABLES.LIKES,
         Item: { fromUserId: fromEmail, toUserId: toUserId, action: "REJECTED", timestamp: Date.now() }
     }));
-    
+
     return res.json({ success: true, matched: false, coins: coinUpdate.Attributes.coins });
 } // 01
 
@@ -616,7 +616,7 @@ io.on('connection', (socket) => {
            const users = [fromUserId, toUserId].sort();
 const matchId = `${users[0]}_${users[1]}`;
 
-const item = { 
+const item = {
     matchId: matchId,
     messageId: messageId,
     sender: fromUserId,
@@ -625,9 +625,9 @@ const item = {
 };
 
             // Database me save karo
-            await ddb.send(new PutCommand({ 
-    TableName: "Messages", 
-    Item: item 
+            await ddb.send(new PutCommand({
+    TableName: "Messages",
+    Item: item
 }));
 
 io.to(toUserId).emit('chat:message', {
