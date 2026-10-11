@@ -66,6 +66,33 @@ async function setInteractionStatus(email, targetEmail, status) {
     }
 }
 
+// --- MISSING ENDPOINTS REQUIRED FOR LOGIN / REGISTRATION ---
+app.get('/profile/get/public', async (req, res) => {
+    try {
+        const result = await ddb.send(new GetCommand({ TableName: TABLES.USERS, Key: { email: req.query.email.trim().toLowerCase() } }));
+        res.json(result.Item || null);
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/profile/get', authenticateToken, async (req, res) => {
+    try {
+        const result = await ddb.send(new GetCommand({ TableName: TABLES.USERS, Key: { email: req.query.email.trim().toLowerCase() } }));
+        res.json(result.Item || null);
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/phone/check', async (req, res) => {
+    try {
+        const phone = req.query.phone || "";
+        const result = await ddb.send(new ScanCommand({ 
+            TableName: TABLES.USERS, 
+            FilterExpression: "phoneNumber = :p", 
+            ExpressionAttributeValues: { ":p": phone } 
+        }));
+        res.json({ exists: result.Count > 0 });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // ==========================================
 // IMAGE UPLOAD - COMPATIBLE WITH OLD + NEW APP
 // ==========================================
