@@ -1,3 +1,5 @@
+
+
 require('dotenv').config({ path: __dirname + '/.env' });
 const express = require('express');
 const http = require('http');
@@ -230,7 +232,6 @@ incomingRejected: incomingRejected.map(l => ({
         };
     })
 });
-});
     } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -405,13 +406,13 @@ if (action === "LIKE" || action === "SUPERLIKE") {
        if (action === "REJECTED") {
     // Sirf humare interactions me targets ko REJECTED mark karo
     await setInteractionStatus(fromEmail, toUserId, "REJECTED");
-
+    
     // Likes table me entry dalo ki maine isko reject kiya hai
     await ddb.send(new PutCommand({
         TableName: TABLES.LIKES,
         Item: { fromUserId: fromEmail, toUserId: toUserId, action: "REJECTED", timestamp: Date.now() }
     }));
-
+    
     return res.json({ success: true, matched: false, coins: coinUpdate.Attributes.coins });
 } // 01
 
@@ -524,7 +525,7 @@ app.post('/api/chat/send', authenticateToken, async (req, res) => {
 
         const item = {
     matchId,
-    messageId: req.body.messageId || uuidv4(),
+    messageId: uuidv4(),
     sender: myEmail,
     text,
     imageUrl: req.body.imageUrl || "",
@@ -585,12 +586,29 @@ io.on('connection', (socket) => {
             const text = data.text || data.sdp || ''; // App dono field use karti hai
             const messageId = data.messageId || uuidv4();
 
-            io.to(toUserId).emit('chat:message', {
-                fromUserId: fromUserId,
-                text: text,
-                messageId: messageId,
-                timestamp: Date.now()
-            });
+           const users = [fromUserId, toUserId].sort();
+const matchId = `${users[0]}_${users[1]}`;
+
+const item = { 
+    matchId: matchId,
+    messageId: messageId,
+    sender: fromUserId,
+    text: text,
+    timestamp: String(Date.now())
+};
+
+            // Database me save karo
+            await ddb.send(new PutCommand({ 
+    TableName: "Messages", 
+    Item: item 
+}));
+
+io.to(toUserId).emit('chat:message', {
+    fromUserId: fromUserId,
+    text: text,
+    messageId: messageId,
+    timestamp: Number(item.timestamp)
+});
         } catch (e) { console.error('Socket chat error:', e.message); }
     });
 
