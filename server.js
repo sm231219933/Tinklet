@@ -95,20 +95,14 @@ app.get('/phone/check', async (req, res) => {
 });
 
 // ==========================================
-// IMAGE UPLOAD - COMPATIBLE WITH OLD + NEW APP
-// ==========================================
-// ==========================================
-// MEDIA UPLOAD STUB (VOICE / VIDEO NOTES)
+// MEDIA & IMAGE UPLOADS
 // ==========================================
 app.post('/media/upload', async (req, res) => {
     try {
         const { mediaType } = req.body;
-        // Since we don't have S3 connected, we return a dummy URL
-        // that matches the mediaType so the App recognizes it as valid media
         const dummyUrl = mediaType === "video"
             ? "https://www.w3schools.com/html/mov_bbb.mp4"
             : "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3";
-
         res.json({ url: dummyUrl });
     } catch (e) { res.status(500).json({ error: "Upload fail" }); }
 });
@@ -120,7 +114,6 @@ app.post('/image/upload', async (req, res) => {
         res.json({ url: resp.data.data.url });
     } catch (e) { res.status(500).json({ error: "Upload fail" }); }
 });
-
 
 app.post('/api/auth/signup', async (req, res) => {
     try {
@@ -153,119 +146,130 @@ app.post('/api/auth/login', async (req, res) => {
 
 app.get('/api/sync/all', authenticateToken, async (req, res) => {
     try {
-        const email = req.user.email.trim().toLowerCase();
+        const email = req.user.email;
         const allUsers = await ddb.send(new ScanCommand({ TableName: TABLES.USERS }));
         const profileMap = {};
-        (allUsers.Items || []).forEach(u => {
-            if (u.email) {
-                const cleanEmail = u.email.trim().toLowerCase();
-                profileMap[cleanEmail] = { ...u, email: cleanEmail, photoUri: u.photoUri || u.photoUrl || "" };
-            }
-        });
-
-        // 1. Sent requests by me
+        (allUsers.Items || []).forEach(u => { if (u.email) profileMap[u.email.toLowerCase()] = { ...u, photoUri: u.photoUri || u.photoUrl || "" }; });
+      //01
         const sentResult = await ddb.send(new QueryCommand({
-            TableName: TABLES.LIKES,
-            KeyConditionExpression: "fromUserId = :me",
-            ExpressionAttributeValues: { ":me": email }
-        }));
+    TableName: TABLES.LIKES,
+    KeyConditionExpression: "fromUserId = :me",
+    ExpressionAttributeValues: { ":me": email }
+}));
 
-        const sent = (sentResult.Items || []).filter(l => {
-            const action = String(l.action || "").trim().toUpperCase();
-            return ["LIKE", "SUPERLIKE"].includes(action) && String(l.fromUserId || "").trim().toLowerCase() === email;
-        });
+// Sent me sirf meri taraf se bheje gaye pending LIKE/SUPERLIKE dikhen.
+// ACCEPTED/REJECTED ko Sent request nahi maana jayega.
+const sent = (sentResult.Items || []).filter(l => {
+    const action = String(l.action || "").trim().toUpperCase();
 
-        // 2. Incoming requests to me
+    return (
+        ["LIKE", "SUPERLIKE"].includes(action) &&
+        String(l.fromUserId || "").trim().toLowerCase() === email
+    );
+});
+
+// 01
+
+        let incomingItems = [];
+        try {
+            const incomingGsi = await ddb.send(new QueryCommand({ TableName: TABLES.LIKES, IndexName: "toUserId-index", KeyConditionExpression: "toUserId = :me", ExpressionAttributeValues: { ":me": email } }));
+            incomingItems = incomingGsi.Items || [];
+        } catch (e) { console.error("[SYNC] Incoming GSI query failed:", e.message); }
+       // 01
         const allLikes = await ddb.send(new ScanCommand({ TableName: TABLES.LIKES }));
-        const myProfileRes = await ddb.send(new GetCommand({ TableName: TABLES.USERS, Key: { email } }));
-        const myInteractions = myProfileRes.Item?.interactions || {};
+const myProfileRes = await ddb.send(new GetCommand({ TableName: TABLES.USERS, Key: { email } }));
+const myInteractions = myProfileRes.Item?.interactions || {};
 
-        const scannedIncoming = (allLikes.Items || []).filter(l =>
-            String(l.toUserId || "").trim().toLowerCase() === email
-        );
+const scannedIncoming = (allLikes.Items || []).filter(l => String(l.toUserId || "").trim().toLowerCase() === email);
+const incomingMap = new Map();
+[...incomingItems, ...scannedIncoming].forEach(l => incomingMap.set(`${String(l.fromUserId || "").toLowerCase()}::${String(l.toUserId || "").toLowerCase()}`, l));
 
-        const incomingMap = new Map();
-        scannedIncoming.forEach(l => {
-            const key = `${String(l.fromUserId || "").trim().toLowerCase()}::${String(l.toUserId || "").trim().toLowerCase()}`;
-            incomingMap.set(key, l);
-        });
+// Sirf wahi incoming requests filter karo jo abhi tak ACCEPT ya REJECT nahi hui hain ----- 01
+const incomingLikes = [...incomingMap.values()].filter(l => {
+    const actionUpper = String(l.action || "").trim().toUpperCase();
+    const fromEmail = String(l.fromUserId || "").trim().toLowerCase();
+    const toEmail = String(l.toUserId || "").trim().toLowerCase();
+    const myInteractionWithPartner = String(myInteractions[fromEmail] || "").trim().toUpperCase();
 
-        const incomingLikes = [...incomingMap.values()].filter(l => {
-            const actionUpper = String(l.action || "").trim().toUpperCase();
-            const fromEmail = String(l.fromUserId || "").trim().toLowerCase();
-            const toEmail = String(l.toUserId || "").trim().toLowerCase();
-            const myInteractionWithPartner = String(myInteractions[fromEmail] || "").trim().toUpperCase();
+    return fromEmail !== email &&
+           toEmail === email &&
+           actionUpper === "LIKE" &&
+           myInteractionWithPartner !== "ACCEPTED" &&
+           myInteractionWithPartner !== "REJECTED";
+});
 
-            return fromEmail !== email &&
-                   toEmail === email &&
-                   actionUpper === "LIKE" &&
-                   myInteractionWithPartner !== "ACCEPTED";
-        });
+const incomingSuperlikes = [...incomingMap.values()].filter(l => {
+    const actionUpper = String(l.action || "").trim().toUpperCase();
+    const fromEmail = String(l.fromUserId || "").trim().toLowerCase();
+    const toEmail = String(l.toUserId || "").trim().toLowerCase();
+    const myInteractionWithPartner = String(myInteractions[fromEmail] || "").trim().toUpperCase();
 
-        const incomingSuperlikes = [...incomingMap.values()].filter(l => {
-            const actionUpper = String(l.action || "").trim().toUpperCase();
-            const fromEmail = String(l.fromUserId || "").trim().toLowerCase();
-            const toEmail = String(l.toUserId || "").trim().toLowerCase();
-            const myInteractionWithPartner = String(myInteractions[fromEmail] || "").trim().toUpperCase();
-
-            return fromEmail !== email &&
-                   toEmail === email &&
-                   actionUpper === "SUPERLIKE" &&
-                   myInteractionWithPartner !== "ACCEPTED";
-        });
-
+    return fromEmail !== email &&
+           toEmail === email &&
+           actionUpper === "SUPERLIKE" &&
+           myInteractionWithPartner !== "ACCEPTED" &&
+           myInteractionWithPartner !== "REJECTED";
+});
         const incomingRejected = [...incomingMap.values()].filter(l => {
-            const actionUpper = String(l.action || "").trim().toUpperCase();
-            const fromEmail = String(l.fromUserId || "").trim().toLowerCase();
-            const toEmail = String(l.toUserId || "").trim().toLowerCase();
+    const actionUpper = String(l.action || "").trim().toUpperCase();
+    const fromEmail = String(l.fromUserId || "").trim().toLowerCase();
+    const toEmail = String(l.toUserId || "").trim().toLowerCase();
 
-            return fromEmail !== email && toEmail === email && actionUpper === "REJECTED";
-        });
+    return (
+        fromEmail !== email &&
+        toEmail === email &&
+        actionUpper === "REJECTED"
+    );
+});
+      //  01
 
         const matches = await ddb.send(new ScanCommand({ TableName: TABLES.MATCHES, FilterExpression: "contains(#u, :me)", ExpressionAttributeNames: { "#u": "users" }, ExpressionAttributeValues: { ":me": email } }));
-
         res.json({
-            user: profileMap[email] || null,
-            sent: sent.map(l => ({
-                fromUserId: String(l.fromUserId || "").trim().toLowerCase(),
-                toUserId: String(l.toUserId || "").trim().toLowerCase(),
-                action: l.action,
-                timestamp: l.timestamp || 0,
-                profile: profileMap[String(l.toUserId || "").trim().toLowerCase()] || null
-            })),
-            incomingLikes: incomingLikes.map(l => ({
-                fromUserId: String(l.fromUserId || "").trim().toLowerCase(),
-                toUserId: String(l.toUserId || "").trim().toLowerCase(),
-                action: l.action,
-                timestamp: l.timestamp || 0,
-                profile: profileMap[String(l.fromUserId || "").trim().toLowerCase()] || null
-            })),
-            incomingSuperlikes: incomingSuperlikes.map(l => ({
-                fromUserId: String(l.fromUserId || "").trim().toLowerCase(),
-                toUserId: String(l.toUserId || "").trim().toLowerCase(),
-                action: l.action,
-                timestamp: l.timestamp || 0,
-                profile: profileMap[String(l.fromUserId || "").trim().toLowerCase()] || null
-            })),
-            incomingRejected: incomingRejected.map(l => ({
-                fromUserId: String(l.fromUserId || "").trim().toLowerCase(),
-                toUserId: String(l.toUserId || "").trim().toLowerCase(),
-                action: l.action,
-                timestamp: l.timestamp || 0,
-                profile: profileMap[String(l.fromUserId || "").trim().toLowerCase()] || null
-            })),
-            matches: (matches.Items || []).map(m => {
-                const partnerEmail = (m.users || []).find(u => String(u).toLowerCase().trim() !== email);
-                return {
-                    ...m,
-                    partnerProfile: profileMap[String(partnerEmail || "").trim().toLowerCase()] || null
-                };
-            })
-        });
-    } catch (e) {
-        console.error("Sync All Error:", e);
-        res.status(500).json({ error: e.message });
-    }
+    user: profileMap[email],
+
+    sent: sent.map(l => ({
+    fromUserId: l.fromUserId,
+    toUserId: l.toUserId,
+    action: l.action,
+    timestamp: l.timestamp || 0,
+    profile: profileMap[String(l.toUserId || "").trim().toLowerCase()] || null
+})),
+
+   incomingLikes: incomingLikes.map(l => ({
+    fromUserId: l.fromUserId,
+    toUserId: l.toUserId,
+    action: l.action,
+    timestamp: l.timestamp || 0,
+    profile: profileMap[String(l.fromUserId || "").trim().toLowerCase()] || null
+})),
+
+incomingSuperlikes: incomingSuperlikes.map(l => ({
+    fromUserId: l.fromUserId,
+    toUserId: l.toUserId,
+    action: l.action,
+    timestamp: l.timestamp || 0,
+    profile: profileMap[String(l.fromUserId || "").trim().toLowerCase()] || null
+})),
+
+incomingRejected: incomingRejected.map(l => ({
+    fromUserId: l.fromUserId,
+    toUserId: l.toUserId,
+    action: l.action,
+    timestamp: l.timestamp || 0,
+    profile: profileMap[String(l.fromUserId || "").trim().toLowerCase()] || null
+})),
+//01
+        // Naya code purane data (...m) ke saath details extra add kar raha hai
+    matches: (matches.Items || []).map(m => {
+        const partnerEmail = (m.users || []).find(u => String(u).toLowerCase() !== email.toLowerCase());
+        return {
+            ...m, // Isse purana matchId, users, aur timestamp bilkul safe rahega
+            partnerProfile: profileMap[String(partnerEmail || "").toLowerCase()] || null // Extra details add ho gayi
+            //01
+        };
+    })
+});
+    } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.get('/api/swipe/feed', authenticateToken, async (req, res) => {
@@ -435,12 +439,12 @@ if (action === "LIKE" || action === "SUPERLIKE") {
             await ddb.send(new DeleteCommand({ TableName: TABLES.LIKES, Key: { fromUserId: fromEmail, toUserId } }));
             return res.json({ success: true, matched: false, coins: coinUpdate.Attributes.coins });
         }
-//01
-        // UNMATCH (Action: UNMATCH)
+
+        // UNMATCH
         if (action === "UNMATCH") {
             try {
-                await setInteractionStatus(fromEmail, toUserId, "UNMATCHED");
-                await setInteractionStatus(toUserId, fromEmail, "UNMATCHED");
+                await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email: fromEmail }, UpdateExpression: "REMOVE interactions.#target", ExpressionAttributeNames: { "#target": toUserId } }));
+                await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email: toUserId }, UpdateExpression: "REMOVE interactions.#target", ExpressionAttributeNames: { "#target": fromEmail } }));
             } catch(e) {}
             try { await ddb.send(new DeleteCommand({ TableName: TABLES.LIKES, Key: { fromUserId: fromEmail, toUserId } })); } catch(e){}
             try { await ddb.send(new DeleteCommand({ TableName: TABLES.LIKES, Key: { fromUserId: toUserId, toUserId: fromEmail } })); } catch(e){}
@@ -460,13 +464,11 @@ if (action === "LIKE" || action === "SUPERLIKE") {
         Item: { fromUserId: fromEmail, toUserId: toUserId, action: "REJECTED", timestamp: Date.now() }
     }));
 
-    try { io.to(toUserId).emit('sync_needed', { fromUserId: fromEmail, action: "REJECTED" }); } catch(err) {}
     return res.json({ success: true, matched: false, coins: coinUpdate.Attributes.coins });
 } // 01
 
         await setInteractionStatus(fromEmail, toUserId, action);
         await ddb.send(new PutCommand({ TableName: TABLES.LIKES, Item: { fromUserId: fromEmail, toUserId, action, timestamp: Date.now() } }));
-        try { io.to(toUserId).emit('sync_needed', { fromUserId: fromEmail, action }); } catch(err) {}
         return res.json({ success: true, matched: false, coins: coinUpdate.Attributes.coins });
     } catch (e) {
         console.error("[SWIPE FAIL]:", e.message);
@@ -475,11 +477,91 @@ if (action === "LIKE" || action === "SUPERLIKE") {
     }
 });
 
-app.post('/api/coins/reward', authenticateToken, async (req, res) => {
+// --- NEW FEATURES APIS ---
+app.post('/api/coins/deduct', authenticateToken, async (req, res) => {
     try {
-        const update = await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email: req.user.email }, UpdateExpression: "SET coins = if_not_exists(coins, :start) + :r", ExpressionAttributeValues: { ":r": 5, ":start": 25 }, ReturnValues: "ALL_NEW" }));
-        res.json({ success: true, coins: Number(update.Attributes.coins) });
+        const { amount, reason } = req.body;
+        if (!amount || amount <= 0) return res.status(400).json({ error: "Invalid amount" });
+
+        const myEmail = req.user.email;
+        const coinUpdate = await ddb.send(new UpdateCommand({
+            TableName: TABLES.USERS,
+            Key: { email: myEmail },
+            UpdateExpression: "SET coins = if_not_exists(coins, :start) - :cost",
+            ConditionExpression: "attribute_not_exists(coins) OR coins >= :cost",
+            ExpressionAttributeValues: { ":start": 25, ":cost": amount },
+            ReturnValues: "ALL_NEW"
+        }));
+        res.json({ success: true, coins: Number(coinUpdate.Attributes.coins) });
+    } catch (e) {
+        if (e.name === "ConditionalCheckFailedException") {
+            return res.status(400).json({ error: "Insufficient coins" });
+        }
+        res.status(500).json({ error: e.message });
+    }
+});
+
+app.post('/api/chat/edit', authenticateToken, async (req, res) => {
+    try {
+        const { messageId, newText } = req.body;
+        if (!messageId || !newText) return res.status(400).json({ error: "Missing fields" });
+
+        const scanRes = await ddb.send(new ScanCommand({
+            TableName: "Messages",
+            FilterExpression: "messageId = :mid",
+            ExpressionAttributeValues: { ":mid": messageId }
+        }));
+
+        if (scanRes.Items && scanRes.Items.length > 0) {
+            for (const item of scanRes.Items) {
+                const key = { matchId: item.matchId };
+                if (item.timestamp !== undefined) key.timestamp = item.timestamp;
+
+                await ddb.send(new UpdateCommand({
+                    TableName: "Messages",
+                    Key: key,
+                    UpdateExpression: "SET #t = :nt, isEdited = :e",
+                    ExpressionAttributeNames: { "#t": "text" },
+                    ExpressionAttributeValues: { ":nt": newText, ":e": true }
+                }));
+            }
+        }
+        res.json({ success: true });
     } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/chat/delete', authenticateToken, async (req, res) => {
+    try {
+        const { messageId } = req.body;
+        if (!messageId) return res.status(400).json({ error: "Missing messageId" });
+
+        const scanRes = await ddb.send(new ScanCommand({
+            TableName: "Messages",
+            FilterExpression: "messageId = :mid",
+            ExpressionAttributeValues: { ":mid": messageId }
+        }));
+
+        if (scanRes.Items && scanRes.Items.length > 0) {
+            for (const item of scanRes.Items) {
+                const key = { matchId: item.matchId };
+                if (item.timestamp !== undefined) key.timestamp = item.timestamp;
+
+                try {
+                    await ddb.send(new DeleteCommand({ TableName: "Messages", Key: key }));
+                } catch (err) {
+                    try {
+                        await ddb.send(new DeleteCommand({ TableName: "Messages", Key: { matchId: item.matchId, messageId: item.messageId } }));
+                    } catch (err2) {}
+                }
+            }
+        }
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/coins/reward', authenticateToken, async (req, res) => {
+    try { const update = await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email: req.user.email }, UpdateExpression: "SET coins = if_not_exists(coins, :start) + :r", ExpressionAttributeValues: { ":r": 5, ":start": 25 }, ReturnValues: "ALL_NEW" })); res.json({ success: true, coins: Number(update.Attributes.coins) }); }
+    catch (e) { res.status(500).json({ error: e.message }); }
 });
 app.post('/api/referral/credit', authenticateToken, async (req, res) => {
     try { const { code } = req.body; const all = await ddb.send(new ScanCommand({ TableName: TABLES.USERS })); const referrer = all.Items.find(u => u.referralCode === code); if (referrer) { await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email: referrer.email }, UpdateExpression: "SET coins = if_not_exists(coins, :start) + :b", ExpressionAttributeValues: { ":b": 50, ":start": 25 } })); res.json({ success: true }); } else { res.status(404).json({ error: "Invalid code" }); } }
@@ -510,8 +592,6 @@ app.post('/profile/save', authenticateToken, async (req, res) => {
         await ddb.send(new UpdateCommand({
             TableName: TABLES.USERS,
             Key: { email: req.user.email },
-
-            // Dhyan de: state ko #st aur language ko #lang likha gaya hai taaki DynamoDB crash na ho
             UpdateExpression:
                 "SET #name = :name, #u = :u, age = :age, gender = :gender, country = :country, #st = :state, latitude = :lat, longitude = :lon, photoUri = :photoUri, bio = :bio, secondaryPhotos = :secondaryPhotos, dob = :dob, height = :height, religion = :religion, education = :education, profession = :profession, diet = :diet, habits = :habits, #lang = :language, introVideoUri = :introVideoUri, deviceId = :deviceId",
 
@@ -555,7 +635,6 @@ app.post('/profile/save', authenticateToken, async (req, res) => {
     }
 });
 
-
 app.get('/profile/me', authenticateToken, async (req, res) => {
     try { const result = await ddb.send(new GetCommand({ TableName: TABLES.USERS, Key: { email: req.user.email } })); res.json({ user: result.Item }); }
     catch (e) { res.status(500).json({ error: e.message }); }
@@ -569,104 +648,6 @@ app.get('/profile/:email', authenticateToken, async (req, res) => {
 app.get('/api/matches', authenticateToken, async (req, res) => {
     try { const result = await ddb.send(new ScanCommand({ TableName: TABLES.MATCHES, FilterExpression: "contains(#u, :me)", ExpressionAttributeNames: { "#u": "users" }, ExpressionAttributeValues: { ":me": req.user.email } })); res.json({ matches: result.Items || [] }); }
     catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-// --- NEW: COIN DEDUCT API ---
-app.post('/api/coins/deduct', authenticateToken, async (req, res) => {
-    try {
-        const { amount, reason } = req.body;
-        if (!amount || amount <= 0) return res.status(400).json({ error: "Invalid amount" });
-
-        const myEmail = req.user.email;
-
-        // Deduct coins if user has enough
-        const coinUpdate = await ddb.send(new UpdateCommand({
-            TableName: TABLES.USERS,
-            Key: { email: myEmail },
-            UpdateExpression: "SET coins = if_not_exists(coins, :start) - :cost",
-            ConditionExpression: "attribute_not_exists(coins) OR coins >= :cost",
-            ExpressionAttributeValues: { ":start": 25, ":cost": amount },
-            ReturnValues: "ALL_NEW"
-        }));
-
-        res.json({ success: true, coins: Number(coinUpdate.Attributes.coins) });
-    } catch (e) {
-        if (e.name === "ConditionalCheckFailedException") {
-            return res.status(400).json({ error: "Insufficient coins" });
-        }
-        res.status(500).json({ error: e.message });
-    }
-});
-
-// --- NEW: EDIT MESSAGE API ---
-app.post('/api/chat/edit', authenticateToken, async (req, res) => {
-    try {
-        const { messageId, newText } = req.body;
-        if (!messageId || !newText) return res.status(400).json({ error: "Missing fields" });
-
-        const scanRes = await ddb.send(new ScanCommand({
-            TableName: "Messages",
-            FilterExpression: "messageId = :mid",
-            ExpressionAttributeValues: { ":mid": messageId }
-        }));
-
-        if (scanRes.Items && scanRes.Items.length > 0) {
-            for (const item of scanRes.Items) {
-                const key = { matchId: item.matchId };
-                if (item.timestamp !== undefined) key.timestamp = item.timestamp;
-
-                await ddb.send(new UpdateCommand({
-                    TableName: "Messages",
-                    Key: key,
-                    UpdateExpression: "SET #t = :nt, isEdited = :e",
-                    ExpressionAttributeNames: { "#t": "text" },
-                    ExpressionAttributeValues: { ":nt": newText, ":e": true }
-                }));
-            }
-        }
-
-        res.json({ success: true });
-    } catch (e) {
-        console.error("Edit Message Error:", e.message);
-        res.status(500).json({ error: e.message });
-    }
-});
-
-// --- NEW: DELETE MESSAGE API ---
-app.post('/api/chat/delete', authenticateToken, async (req, res) => {
-    try {
-        const { messageId } = req.body;
-        if (!messageId) return res.status(400).json({ error: "Missing messageId" });
-
-        // Scan Messages table to find the record with this messageId
-        const scanRes = await ddb.send(new ScanCommand({
-            TableName: "Messages",
-            FilterExpression: "messageId = :mid",
-            ExpressionAttributeValues: { ":mid": messageId }
-        }));
-
-        if (scanRes.Items && scanRes.Items.length > 0) {
-            for (const item of scanRes.Items) {
-                const key = { matchId: item.matchId };
-                if (item.timestamp !== undefined) key.timestamp = item.timestamp;
-
-                try {
-                    await ddb.send(new DeleteCommand({ TableName: "Messages", Key: key }));
-                } catch (err) {
-                    try {
-                        await ddb.send(new DeleteCommand({ TableName: "Messages", Key: { matchId: item.matchId, messageId: item.messageId } }));
-                    } catch (err2) {
-                        console.error("Delete fallback error:", err2.message);
-                    }
-                }
-            }
-        }
-
-        res.json({ success: true });
-    } catch (e) {
-        console.error("Delete Message Error:", e.message);
-        res.status(500).json({ error: e.message });
-    }
 });
 
 app.get('/api/chat/:matchId', authenticateToken, async (req, res) => {
@@ -684,18 +665,17 @@ app.post('/api/chat/send', authenticateToken, async (req, res) => {
         }
 
         const myEmail = req.user.email.trim().toLowerCase();
-
         const users = [myEmail, targetEmail].sort();
         const matchId = `${users[0]}_${users[1]}`;
 
-             const item = {
-                 matchId,
-                 messageId: req.body.messageId || uuidv4(), // req.body.messageId waali logic add karni hai
-                 sender: myEmail,
-                 text,
-                 imageUrl: req.body.imageUrl || "",
-                 timestamp: String(Date.now())
-             };
+        const item = {
+            matchId,
+            messageId: req.body.messageId || uuidv4(),
+            sender: myEmail,
+            text,
+            imageUrl: req.body.imageUrl || "",
+            timestamp: String(Date.now())
+        };
 
         await ddb.send(new PutCommand({
             TableName: "Messages",
@@ -728,9 +708,8 @@ app.post('/api/account/logout', authenticateToken, async (req, res) => {
 });
 
 app.get('/health', (req, res) => res.json({ ok: true }));
-//01
+
 io.on('connection', (socket) => {
-    // 1. Register/Join: App dono me se koi bhi bhej sakti hai
     socket.on('register', (userId) => {
         const room = String(userId || '').toLowerCase();
         socket.join(room);
@@ -743,55 +722,50 @@ io.on('connection', (socket) => {
         console.log(`User joined room: ${room}`);
     });
 
-    // 2. Structured Chat Message Handler
     socket.on('chat:message', async (data) => {
         try {
             const toUserId = String(data.toUserId || '').toLowerCase();
             const fromUserId = String(data.fromUserId || '').toLowerCase();
-            const text = data.text || data.sdp || ''; // App dono field use karti hai
+            const text = data.text || data.sdp || '';
             const messageId = data.messageId || uuidv4();
 
-           const users = [fromUserId, toUserId].sort();
-const matchId = `${users[0]}_${users[1]}`;
+            const users = [fromUserId, toUserId].sort();
+            const matchId = `${users[0]}_${users[1]}`;
 
-const item = {
-    matchId: matchId,
-    messageId: messageId,
-    sender: fromUserId,
-    text: text,
-    timestamp: String(Date.now())
-};
+            const item = {
+                matchId: matchId,
+                messageId: messageId,
+                sender: fromUserId,
+                text: text,
+                timestamp: String(Date.now())
+            };
 
-            // Database me save karo
             await ddb.send(new PutCommand({
-    TableName: "Messages",
-    Item: item
-}));
+                TableName: "Messages",
+                Item: item
+            }));
 
-io.to(toUserId).emit('chat:message', {
-    fromUserId: fromUserId,
-    text: text,
-    messageId: messageId,
-    timestamp: Number(item.timestamp)
-});
+            io.to(toUserId).emit('chat:message', {
+                fromUserId: fromUserId,
+                text: text,
+                messageId: messageId,
+                timestamp: Number(item.timestamp)
+            });
         } catch (e) { console.error('Socket chat error:', e.message); }
     });
 
-    // --- NEW SOCKET EVENTS FOR APP FEATURES ---
     socket.on('message:delivered', (data) => io.to(String(data.toUserId).toLowerCase()).emit('message:delivered', data));
     socket.on('message:read', (data) => io.to(String(data.toUserId).toLowerCase()).emit('message:read', data));
     socket.on('message:edited', (data) => io.to(String(data.toUserId).toLowerCase()).emit('message:edited', data));
     socket.on('message:deleted', (data) => io.to(String(data.toUserId).toLowerCase()).emit('message:deleted', data));
     socket.on('unmatch_user', (data) => io.to(String(data.toUserId).toLowerCase()).emit('unmatch_user', data));
 
-    // 3. Structured Calling Handlers (SignalingClient.kt ke liye)
     socket.on('call:offer', (data) => io.to(String(data.toUserId).toLowerCase()).emit('call:incoming', data));
     socket.on('call:answer', (data) => io.to(String(data.toUserId).toLowerCase()).emit('call:answered', data));
     socket.on('call:reject', (data) => io.to(String(data.toUserId).toLowerCase()).emit('call:rejected', data));
     socket.on('call:ice-candidate', (data) => io.to(String(data.toUserId).toLowerCase()).emit('call:ice-candidate', data));
     socket.on('call:end', (data) => io.to(String(data.toUserId).toLowerCase()).emit('call:ended', data));
 });
-//01
 
 const PORT = process.env.PORT || 4000;
 masterServer.listen(PORT, '0.0.0.0', () => console.log(`Tinklet API running on port ${PORT}`));
