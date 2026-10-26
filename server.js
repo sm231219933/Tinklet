@@ -19,6 +19,7 @@ const pino = require('pino');
 const app = express();
 app.use(cors());
 app.use(bodyParser.json({ limit: '50mb' }));
+app.use(bodyParser.urlencoded({ limit: '50mb', extended: true }));
 const masterServer = http.createServer(app);
 const io = new Server(masterServer, { cors: { origin: "*" } });
 const client = new DynamoDBClient({ region: "ap-south-1", credentials: { accessKeyId: process.env.AWS_ACCESS_KEY_ID, secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY } });
@@ -96,6 +97,22 @@ app.get('/phone/check', async (req, res) => {
 // ==========================================
 // IMAGE UPLOAD - COMPATIBLE WITH OLD + NEW APP
 // ==========================================
+// ==========================================
+// MEDIA UPLOAD STUB (VOICE / VIDEO NOTES)
+// ==========================================
+app.post('/media/upload', async (req, res) => {
+    try {
+        const { mediaType } = req.body;
+        // Since we don't have S3 connected, we return a dummy URL
+        // that matches the mediaType so the App recognizes it as valid media
+        const dummyUrl = mediaType === "video"
+            ? "https://www.w3schools.com/html/mov_bbb.mp4"
+            : "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3";
+
+        res.json({ url: dummyUrl });
+    } catch (e) { res.status(500).json({ error: "Upload fail" }); }
+});
+
 app.post('/image/upload', async (req, res) => {
     try {
         const data = require('qs').stringify({ image: req.body.base64Image.split(',')[1] || req.body.base64Image });
@@ -430,6 +447,20 @@ if (action === "LIKE" || action === "SUPERLIKE") {
             return res.json({ success: true, matched: false, coins: coinUpdate.Attributes.coins });
         }
 //01
+        // UNMATCH (Action: UNMATCH)
+        if (action === "UNMATCH") {
+            try {
+                await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email: fromEmail }, UpdateExpression: "REMOVE interactions.#target", ExpressionAttributeNames: { "#target": toUserId } }));
+                await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email: toUserId }, UpdateExpression: "REMOVE interactions.#target", ExpressionAttributeNames: { "#target": fromEmail } }));
+            } catch(e) {}
+            try { await ddb.send(new DeleteCommand({ TableName: TABLES.LIKES, Key: { fromUserId: fromEmail, toUserId } })); } catch(e){}
+            try { await ddb.send(new DeleteCommand({ TableName: TABLES.LIKES, Key: { fromUserId: toUserId, toUserId: fromEmail } })); } catch(e){}
+
+            const matchId1 = createMatchId(fromEmail, toUserId);
+            try { await ddb.send(new DeleteCommand({ TableName: TABLES.MATCHES, Key: { matchId: matchId1 } })); } catch(e){}
+            return res.json({ success: true, matched: false });
+        }
+
        if (action === "REJECTED") {
     // Sirf humare interactions me targets ko REJECTED mark karo
     await setInteractionStatus(fromEmail, toUserId, "REJECTED");
@@ -547,6 +578,51 @@ app.get('/api/matches', authenticateToken, async (req, res) => {
     catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// --- NEW: COIN DEDUCT API ---
+app.post('/api/coins/deduct', authenticateToken, async (req, res) => {
+    try {
+        const { amount, reason } = req.body;
+        if (!amount || amount <= 0) return res.status(400).json({ error: "Invalid amount" });
+
+        const myEmail = req.user.email;
+
+        // Deduct coins if user has enough
+        const coinUpdate = await ddb.send(new UpdateCommand({
+            TableName: TABLES.USERS,
+            Key: { email: myEmail },
+            UpdateExpression: "SET coins = if_not_exists(coins, :start) - :cost",
+            ConditionExpression: "attribute_not_exists(coins) OR coins >= :cost",
+            ExpressionAttributeValues: { ":start": 25, ":cost": amount },
+            ReturnValues: "ALL_NEW"
+        }));
+
+        res.json({ success: true, coins: Number(coinUpdate.Attributes.coins) });
+    } catch (e) {
+        if (e.name === "ConditionalCheckFailedException") {
+            return res.status(400).json({ error: "Insufficient coins" });
+        }
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// --- NEW: EDIT MESSAGE API ---
+app.post('/api/chat/edit', authenticateToken, async (req, res) => {
+    try {
+        const { messageId, newText } = req.body;
+        if (!messageId || !newText) return res.status(400).json({ error: "Missing fields" });
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// --- NEW: DELETE MESSAGE API ---
+app.post('/api/chat/delete', authenticateToken, async (req, res) => {
+    try {
+        const { messageId } = req.body;
+        if (!messageId) return res.status(400).json({ error: "Missing messageId" });
+        res.json({ success: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 app.get('/api/chat/:matchId', authenticateToken, async (req, res) => {
     try { const result = await ddb.send(new QueryCommand({ TableName: "Messages", KeyConditionExpression: "matchId = :m", ExpressionAttributeValues: { ":m": req.params.matchId } })); res.json({ messages: result.Items || [] }); }
     catch (e) { res.status(500).json({ error: e.message }); }
@@ -654,6 +730,13 @@ io.to(toUserId).emit('chat:message', {
 });
         } catch (e) { console.error('Socket chat error:', e.message); }
     });
+
+    // --- NEW SOCKET EVENTS FOR APP FEATURES ---
+    socket.on('message:delivered', (data) => io.to(String(data.toUserId).toLowerCase()).emit('message:delivered', data));
+    socket.on('message:read', (data) => io.to(String(data.toUserId).toLowerCase()).emit('message:read', data));
+    socket.on('message:edited', (data) => io.to(String(data.toUserId).toLowerCase()).emit('message:edited', data));
+    socket.on('message:deleted', (data) => io.to(String(data.toUserId).toLowerCase()).emit('message:deleted', data));
+    socket.on('unmatch_user', (data) => io.to(String(data.toUserId).toLowerCase()).emit('unmatch_user', data));
 
     // 3. Structured Calling Handlers (SignalingClient.kt ke liye)
     socket.on('call:offer', (data) => io.to(String(data.toUserId).toLowerCase()).emit('call:incoming', data));
