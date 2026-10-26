@@ -450,8 +450,8 @@ if (action === "LIKE" || action === "SUPERLIKE") {
         // UNMATCH (Action: UNMATCH)
         if (action === "UNMATCH") {
             try {
-                await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email: fromEmail }, UpdateExpression: "REMOVE interactions.#target", ExpressionAttributeNames: { "#target": toUserId } }));
-                await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email: toUserId }, UpdateExpression: "REMOVE interactions.#target", ExpressionAttributeNames: { "#target": fromEmail } }));
+                await setInteractionStatus(fromEmail, toUserId, "UNMATCHED");
+                await setInteractionStatus(toUserId, fromEmail, "UNMATCHED");
             } catch(e) {}
             try { await ddb.send(new DeleteCommand({ TableName: TABLES.LIKES, Key: { fromUserId: fromEmail, toUserId } })); } catch(e){}
             try { await ddb.send(new DeleteCommand({ TableName: TABLES.LIKES, Key: { fromUserId: toUserId, toUserId: fromEmail } })); } catch(e){}
@@ -610,8 +610,33 @@ app.post('/api/chat/edit', authenticateToken, async (req, res) => {
     try {
         const { messageId, newText } = req.body;
         if (!messageId || !newText) return res.status(400).json({ error: "Missing fields" });
+
+        const scanRes = await ddb.send(new ScanCommand({
+            TableName: "Messages",
+            FilterExpression: "messageId = :mid",
+            ExpressionAttributeValues: { ":mid": messageId }
+        }));
+
+        if (scanRes.Items && scanRes.Items.length > 0) {
+            for (const item of scanRes.Items) {
+                const key = { matchId: item.matchId };
+                if (item.timestamp !== undefined) key.timestamp = item.timestamp;
+
+                await ddb.send(new UpdateCommand({
+                    TableName: "Messages",
+                    Key: key,
+                    UpdateExpression: "SET #t = :nt, isEdited = :e",
+                    ExpressionAttributeNames: { "#t": "text" },
+                    ExpressionAttributeValues: { ":nt": newText, ":e": true }
+                }));
+            }
+        }
+
         res.json({ success: true });
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    } catch (e) {
+        console.error("Edit Message Error:", e.message);
+        res.status(500).json({ error: e.message });
+    }
 });
 
 // --- NEW: DELETE MESSAGE API ---
@@ -619,8 +644,36 @@ app.post('/api/chat/delete', authenticateToken, async (req, res) => {
     try {
         const { messageId } = req.body;
         if (!messageId) return res.status(400).json({ error: "Missing messageId" });
+
+        // Scan Messages table to find the record with this messageId
+        const scanRes = await ddb.send(new ScanCommand({
+            TableName: "Messages",
+            FilterExpression: "messageId = :mid",
+            ExpressionAttributeValues: { ":mid": messageId }
+        }));
+
+        if (scanRes.Items && scanRes.Items.length > 0) {
+            for (const item of scanRes.Items) {
+                const key = { matchId: item.matchId };
+                if (item.timestamp !== undefined) key.timestamp = item.timestamp;
+
+                try {
+                    await ddb.send(new DeleteCommand({ TableName: "Messages", Key: key }));
+                } catch (err) {
+                    try {
+                        await ddb.send(new DeleteCommand({ TableName: "Messages", Key: { matchId: item.matchId, messageId: item.messageId } }));
+                    } catch (err2) {
+                        console.error("Delete fallback error:", err2.message);
+                    }
+                }
+            }
+        }
+
         res.json({ success: true });
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    } catch (e) {
+        console.error("Delete Message Error:", e.message);
+        res.status(500).json({ error: e.message });
+    }
 });
 
 app.get('/api/chat/:matchId', authenticateToken, async (req, res) => {
