@@ -153,130 +153,119 @@ app.post('/api/auth/login', async (req, res) => {
 
 app.get('/api/sync/all', authenticateToken, async (req, res) => {
     try {
-        const email = req.user.email;
+        const email = req.user.email.trim().toLowerCase();
         const allUsers = await ddb.send(new ScanCommand({ TableName: TABLES.USERS }));
         const profileMap = {};
-        (allUsers.Items || []).forEach(u => { if (u.email) profileMap[u.email.toLowerCase()] = { ...u, photoUri: u.photoUri || u.photoUrl || "" }; });
-      //01
+        (allUsers.Items || []).forEach(u => {
+            if (u.email) {
+                const cleanEmail = u.email.trim().toLowerCase();
+                profileMap[cleanEmail] = { ...u, email: cleanEmail, photoUri: u.photoUri || u.photoUrl || "" };
+            }
+        });
+
+        // 1. Sent requests by me
         const sentResult = await ddb.send(new QueryCommand({
-    TableName: TABLES.LIKES,
-    KeyConditionExpression: "fromUserId = :me",
-    ExpressionAttributeValues: { ":me": email }
-}));
+            TableName: TABLES.LIKES,
+            KeyConditionExpression: "fromUserId = :me",
+            ExpressionAttributeValues: { ":me": email }
+        }));
 
-// Sent me sirf meri taraf se bheje gaye pending LIKE/SUPERLIKE dikhen.
-// ACCEPTED/REJECTED ko Sent request nahi maana jayega.
-const sent = (sentResult.Items || []).filter(l => {
-    const action = String(l.action || "").trim().toUpperCase();
+        const sent = (sentResult.Items || []).filter(l => {
+            const action = String(l.action || "").trim().toUpperCase();
+            return ["LIKE", "SUPERLIKE"].includes(action) && String(l.fromUserId || "").trim().toLowerCase() === email;
+        });
 
-    return (
-        ["LIKE", "SUPERLIKE"].includes(action) &&
-        String(l.fromUserId || "").trim().toLowerCase() === email
-    );
-});
-
-// 01
-
-        let incomingItems = [];
-        try {
-            const incomingGsi = await ddb.send(new QueryCommand({ TableName: TABLES.LIKES, IndexName: "toUserId-index", KeyConditionExpression: "toUserId = :me", ExpressionAttributeValues: { ":me": email } }));
-            incomingItems = incomingGsi.Items || [];
-        } catch (e) { console.error("[SYNC] Incoming GSI query failed:", e.message); }
-       // 01
+        // 2. Incoming requests to me
         const allLikes = await ddb.send(new ScanCommand({ TableName: TABLES.LIKES }));
-const myProfileRes = await ddb.send(new GetCommand({ TableName: TABLES.USERS, Key: { email } }));
-const myInteractions = myProfileRes.Item?.interactions || {};
+        const myProfileRes = await ddb.send(new GetCommand({ TableName: TABLES.USERS, Key: { email } }));
+        const myInteractions = myProfileRes.Item?.interactions || {};
 
-const scannedIncoming = (allLikes.Items || []).filter(l => String(l.toUserId || "").trim().toLowerCase() === email);
-const incomingMap = new Map();
-[...incomingItems, ...scannedIncoming].forEach(l => incomingMap.set(`${String(l.fromUserId || "").toLowerCase()}::${String(l.toUserId || "").toLowerCase()}`, l));
+        const scannedIncoming = (allLikes.Items || []).filter(l =>
+            String(l.toUserId || "").trim().toLowerCase() === email
+        );
 
-// Sirf wahi incoming requests filter karo jo abhi tak ACCEPT ya REJECT nahi hui hain ----- 01
-const incomingLikes = [...incomingMap.values()].filter(l => {
-    const actionUpper = String(l.action || "").trim().toUpperCase();
-    const fromEmail = String(l.fromUserId || "").trim().toLowerCase();
-    const toEmail = String(l.toUserId || "").trim().toLowerCase();
-    const myInteractionWithPartner = String(myInteractions[fromEmail] || "").trim().toUpperCase();
+        const incomingMap = new Map();
+        scannedIncoming.forEach(l => {
+            const key = `${String(l.fromUserId || "").trim().toLowerCase()}::${String(l.toUserId || "").trim().toLowerCase()}`;
+            incomingMap.set(key, l);
+        });
 
-    return fromEmail !== email &&
-           toEmail === email &&
-           actionUpper === "LIKE" &&
-           myInteractionWithPartner !== "ACCEPTED" &&
-           myInteractionWithPartner !== "REJECTED";
-});
+        const incomingLikes = [...incomingMap.values()].filter(l => {
+            const actionUpper = String(l.action || "").trim().toUpperCase();
+            const fromEmail = String(l.fromUserId || "").trim().toLowerCase();
+            const toEmail = String(l.toUserId || "").trim().toLowerCase();
+            const myInteractionWithPartner = String(myInteractions[fromEmail] || "").trim().toUpperCase();
 
-const incomingSuperlikes = [...incomingMap.values()].filter(l => {
-    const actionUpper = String(l.action || "").trim().toUpperCase();
-    const fromEmail = String(l.fromUserId || "").trim().toLowerCase();
-    const toEmail = String(l.toUserId || "").trim().toLowerCase();
-    const myInteractionWithPartner = String(myInteractions[fromEmail] || "").trim().toUpperCase();
+            return fromEmail !== email &&
+                   toEmail === email &&
+                   actionUpper === "LIKE" &&
+                   myInteractionWithPartner !== "ACCEPTED";
+        });
 
-    return fromEmail !== email &&
-           toEmail === email &&
-           actionUpper === "SUPERLIKE" &&
-           myInteractionWithPartner !== "ACCEPTED" &&
-           myInteractionWithPartner !== "REJECTED";
-});
+        const incomingSuperlikes = [...incomingMap.values()].filter(l => {
+            const actionUpper = String(l.action || "").trim().toUpperCase();
+            const fromEmail = String(l.fromUserId || "").trim().toLowerCase();
+            const toEmail = String(l.toUserId || "").trim().toLowerCase();
+            const myInteractionWithPartner = String(myInteractions[fromEmail] || "").trim().toUpperCase();
+
+            return fromEmail !== email &&
+                   toEmail === email &&
+                   actionUpper === "SUPERLIKE" &&
+                   myInteractionWithPartner !== "ACCEPTED";
+        });
+
         const incomingRejected = [...incomingMap.values()].filter(l => {
-    const actionUpper = String(l.action || "").trim().toUpperCase();
-    const fromEmail = String(l.fromUserId || "").trim().toLowerCase();
-    const toEmail = String(l.toUserId || "").trim().toLowerCase();
+            const actionUpper = String(l.action || "").trim().toUpperCase();
+            const fromEmail = String(l.fromUserId || "").trim().toLowerCase();
+            const toEmail = String(l.toUserId || "").trim().toLowerCase();
 
-    return (
-        fromEmail !== email &&
-        toEmail === email &&
-        actionUpper === "REJECTED"
-    );
-});
-      //  01
+            return fromEmail !== email && toEmail === email && actionUpper === "REJECTED";
+        });
 
         const matches = await ddb.send(new ScanCommand({ TableName: TABLES.MATCHES, FilterExpression: "contains(#u, :me)", ExpressionAttributeNames: { "#u": "users" }, ExpressionAttributeValues: { ":me": email } }));
+
         res.json({
-    user: profileMap[email],
-
-    sent: sent.map(l => ({
-    fromUserId: l.fromUserId,
-    toUserId: l.toUserId,
-    action: l.action,
-    timestamp: l.timestamp || 0,
-    profile: profileMap[String(l.toUserId || "").trim().toLowerCase()] || null
-})),
-
-   incomingLikes: incomingLikes.map(l => ({
-    fromUserId: l.fromUserId,
-    toUserId: l.toUserId,
-    action: l.action,
-    timestamp: l.timestamp || 0,
-    profile: profileMap[String(l.fromUserId || "").trim().toLowerCase()] || null
-})),
-
-incomingSuperlikes: incomingSuperlikes.map(l => ({
-    fromUserId: l.fromUserId,
-    toUserId: l.toUserId,
-    action: l.action,
-    timestamp: l.timestamp || 0,
-    profile: profileMap[String(l.fromUserId || "").trim().toLowerCase()] || null
-})),
-
-incomingRejected: incomingRejected.map(l => ({
-    fromUserId: l.fromUserId,
-    toUserId: l.toUserId,
-    action: l.action,
-    timestamp: l.timestamp || 0,
-    profile: profileMap[String(l.fromUserId || "").trim().toLowerCase()] || null
-})),
-//01
-        // Naya code purane data (...m) ke saath details extra add kar raha hai
-    matches: (matches.Items || []).map(m => {
-        const partnerEmail = (m.users || []).find(u => String(u).toLowerCase() !== email.toLowerCase());
-        return {
-            ...m, // Isse purana matchId, users, aur timestamp bilkul safe rahega
-            partnerProfile: profileMap[String(partnerEmail || "").toLowerCase()] || null // Extra details add ho gayi
-            //01
-        };
-    })
-});
-    } catch (e) { res.status(500).json({ error: e.message }); }
+            user: profileMap[email] || null,
+            sent: sent.map(l => ({
+                fromUserId: String(l.fromUserId || "").trim().toLowerCase(),
+                toUserId: String(l.toUserId || "").trim().toLowerCase(),
+                action: l.action,
+                timestamp: l.timestamp || 0,
+                profile: profileMap[String(l.toUserId || "").trim().toLowerCase()] || null
+            })),
+            incomingLikes: incomingLikes.map(l => ({
+                fromUserId: String(l.fromUserId || "").trim().toLowerCase(),
+                toUserId: String(l.toUserId || "").trim().toLowerCase(),
+                action: l.action,
+                timestamp: l.timestamp || 0,
+                profile: profileMap[String(l.fromUserId || "").trim().toLowerCase()] || null
+            })),
+            incomingSuperlikes: incomingSuperlikes.map(l => ({
+                fromUserId: String(l.fromUserId || "").trim().toLowerCase(),
+                toUserId: String(l.toUserId || "").trim().toLowerCase(),
+                action: l.action,
+                timestamp: l.timestamp || 0,
+                profile: profileMap[String(l.fromUserId || "").trim().toLowerCase()] || null
+            })),
+            incomingRejected: incomingRejected.map(l => ({
+                fromUserId: String(l.fromUserId || "").trim().toLowerCase(),
+                toUserId: String(l.toUserId || "").trim().toLowerCase(),
+                action: l.action,
+                timestamp: l.timestamp || 0,
+                profile: profileMap[String(l.fromUserId || "").trim().toLowerCase()] || null
+            })),
+            matches: (matches.Items || []).map(m => {
+                const partnerEmail = (m.users || []).find(u => String(u).toLowerCase().trim() !== email);
+                return {
+                    ...m,
+                    partnerProfile: profileMap[String(partnerEmail || "").trim().toLowerCase()] || null
+                };
+            })
+        });
+    } catch (e) {
+        console.error("Sync All Error:", e);
+        res.status(500).json({ error: e.message });
+    }
 });
 
 app.get('/api/swipe/feed', authenticateToken, async (req, res) => {
@@ -471,11 +460,13 @@ if (action === "LIKE" || action === "SUPERLIKE") {
         Item: { fromUserId: fromEmail, toUserId: toUserId, action: "REJECTED", timestamp: Date.now() }
     }));
 
+    try { io.to(toUserId).emit('sync_needed', { fromUserId: fromEmail, action: "REJECTED" }); } catch(err) {}
     return res.json({ success: true, matched: false, coins: coinUpdate.Attributes.coins });
 } // 01
 
         await setInteractionStatus(fromEmail, toUserId, action);
         await ddb.send(new PutCommand({ TableName: TABLES.LIKES, Item: { fromUserId: fromEmail, toUserId, action, timestamp: Date.now() } }));
+        try { io.to(toUserId).emit('sync_needed', { fromUserId: fromEmail, action }); } catch(err) {}
         return res.json({ success: true, matched: false, coins: coinUpdate.Attributes.coins });
     } catch (e) {
         console.error("[SWIPE FAIL]:", e.message);
