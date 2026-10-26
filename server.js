@@ -522,7 +522,7 @@ app.post('/profile/save', authenticateToken, async (req, res) => {
 
             // Dhyan de: state ko #st aur language ko #lang likha gaya hai taaki DynamoDB crash na ho
             UpdateExpression:
-                "SET #name = :name, #u = :u, age = :age, gender = :gender, country = :country, #st = :state, photoUri = :photoUri, bio = :bio, secondaryPhotos = :secondaryPhotos, dob = :dob, height = :height, religion = :religion, education = :education, profession = :profession, diet = :diet, habits = :habits, #lang = :language, introVideoUri = :introVideoUri, deviceId = :deviceId",
+                "SET #name = :name, #u = :u, age = :age, gender = :gender, country = :country, #st = :state, latitude = :lat, longitude = :lon, photoUri = :photoUri, bio = :bio, secondaryPhotos = :secondaryPhotos, dob = :dob, height = :height, religion = :religion, education = :education, profession = :profession, diet = :diet, habits = :habits, #lang = :language, introVideoUri = :introVideoUri, deviceId = :deviceId",
 
             ExpressionAttributeNames: {
                 "#name": "name",
@@ -538,6 +538,8 @@ app.post('/profile/save', authenticateToken, async (req, res) => {
                 ":gender": data.gender || "",
                 ":country": data.country || "",
                 ":state": data.state || "",
+                ":lat": data.latitude || 0.0,
+                ":lon": data.longitude || 0.0,
                 ":photoUri": data.photoUri || "",
                 ":bio": data.bio || "",
                 ":secondaryPhotos": data.secondaryPhotos || [],
