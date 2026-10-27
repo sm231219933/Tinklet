@@ -760,6 +760,38 @@ io.on('connection', (socket) => {
     socket.on('message:deleted', (data) => io.to(String(data.toUserId).toLowerCase()).emit('message:deleted', data));
     socket.on('unmatch_user', (data) => io.to(String(data.toUserId).toLowerCase()).emit('unmatch_user', data));
 
+    // Omegle-style Blind Date Queue
+    socket.on('blinddate:join', (data) => {
+        const userId = String(data.fromUserId || '').toLowerCase();
+        const callType = data.callType || 'audio';
+
+        blindDateQueue = blindDateQueue.filter(u => u.userId !== userId && u.socketId !== socket.id);
+        const partnerIndex = blindDateQueue.findIndex(u => u.callType === callType && u.userId !== userId);
+
+        if (partnerIndex !== -1) {
+            const partner = blindDateQueue.splice(partnerIndex, 1)[0];
+
+            io.to(socket.id).emit('blinddate:matched', {
+                partnerId: partner.userId,
+                isCaller: true,
+                callType: callType
+            });
+
+            io.to(partner.socketId).emit('blinddate:matched', {
+                partnerId: userId,
+                isCaller: false,
+                callType: callType
+            });
+        } else {
+            blindDateQueue.push({ userId, socketId: socket.id, callType });
+        }
+    });
+
+    socket.on('blinddate:leave', (data) => {
+        const userId = String(data.fromUserId || '').toLowerCase();
+        blindDateQueue = blindDateQueue.filter(u => u.userId !== userId && u.socketId !== socket.id);
+    });
+
     socket.on('call:offer', (data) => io.to(String(data.toUserId).toLowerCase()).emit('call:incoming', data));
     socket.on('call:answer', (data) => io.to(String(data.toUserId).toLowerCase()).emit('call:answered', data));
     socket.on('call:reject', (data) => io.to(String(data.toUserId).toLowerCase()).emit('call:rejected', data));
