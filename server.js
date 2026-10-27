@@ -593,7 +593,7 @@ app.post('/profile/save', authenticateToken, async (req, res) => {
             TableName: TABLES.USERS,
             Key: { email: req.user.email },
             UpdateExpression:
-                "SET #name = :name, #u = :u, age = :age, gender = :gender, country = :country, #st = :state, latitude = :lat, longitude = :lon, photoUri = :photoUri, bio = :bio, secondaryPhotos = :secondaryPhotos, dob = :dob, height = :height, religion = :religion, education = :education, profession = :profession, diet = :diet, habits = :habits, #lang = :language, introVideoUri = :introVideoUri, deviceId = :deviceId",
+                "SET #name = :name, #u = :u, age = :age, gender = :gender, country = :country, #st = :state, latitude = :lat, longitude = :lon, photoUri = :photoUri, bio = :bio, secondaryPhotos = :secondaryPhotos, dob = :dob, height = :height, religion = :religion, education = :education, profession = :profession, diet = :diet, habits = :habits, #lang = :language, intentions = :intentions, interests = :interests, introVideoUri = :introVideoUri, deviceId = :deviceId",
 
             ExpressionAttributeNames: {
                 "#name": "name",
@@ -622,6 +622,8 @@ app.post('/profile/save', authenticateToken, async (req, res) => {
                 ":diet": data.diet || "",
                 ":habits": data.habits || "",
                 ":language": data.language || "",
+                ":intentions": data.intentions || "",
+                ":interests": data.interests || "",
                 ":introVideoUri": data.introVideoUri || "",
                 ":deviceId": data.deviceId || ""
             }
