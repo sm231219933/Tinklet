@@ -730,28 +730,14 @@ io.on('connection', (socket) => {
             const fromUserId = String(data.fromUserId || '').toLowerCase();
             const text = data.text || data.sdp || '';
             const messageId = data.messageId || uuidv4();
+            const timestamp = data.timestamp || Date.now();
 
-            const users = [fromUserId, toUserId].sort();
-            const matchId = `${users[0]}_${users[1]}`;
-
-            const item = {
-                matchId: matchId,
-                messageId: messageId,
-                sender: fromUserId,
-                text: text,
-                timestamp: String(Date.now())
-            };
-
-            await ddb.send(new PutCommand({
-                TableName: "Messages",
-                Item: item
-            }));
-
+            // Relay message to recipient in real-time
             io.to(toUserId).emit('chat:message', {
                 fromUserId: fromUserId,
                 text: text,
                 messageId: messageId,
-                timestamp: Number(item.timestamp)
+                timestamp: Number(timestamp)
             });
         } catch (e) { console.error('Socket chat error:', e.message); }
     });
