@@ -397,26 +397,14 @@ if (action === "LIKE" || action === "SUPERLIKE") {
 }
       //  01
 
-        // LIKE = 1, SUPERLIKE = 10, REJECTED = 1. ACCEPT = 0 (handled above).
-        const cost = action === "SUPERLIKE" ? 10 : (["REJECTED", "LIKE"].includes(action) ? 1 : 0);
+        // Swiping, Liking, Superliking cost NO coins (FREE for all)
+        const cost = 0;
 
-        let coinUpdate;
-        if (cost > 0) {
-            coinUpdate = await ddb.send(new UpdateCommand({
-                TableName: TABLES.USERS,
-                Key: { email: fromEmail },
-                UpdateExpression: "SET coins = if_not_exists(coins, :start) - :cost",
-                ConditionExpression: "attribute_not_exists(coins) OR coins >= :cost",
-                ExpressionAttributeValues: { ":start": 25, ":cost": cost },
-                ReturnValues: "ALL_NEW"
-            }));
-        } else {
-            const currentUser = await ddb.send(new GetCommand({
-                TableName: TABLES.USERS,
-                Key: { email: fromEmail }
-            }));
-            coinUpdate = { Attributes: { ...(currentUser.Item || {}), coins: Number(currentUser.Item?.coins || 0) } };
-        }
+        const currentUser = await ddb.send(new GetCommand({
+            TableName: TABLES.USERS,
+            Key: { email: fromEmail }
+        }));
+        let coinUpdate = { Attributes: { ...(currentUser.Item || {}), coins: Number(currentUser.Item?.coins || 0) } };
 
         await ddb.send(new UpdateCommand({
             TableName: TABLES.USERS,
@@ -426,18 +414,25 @@ if (action === "LIKE" || action === "SUPERLIKE") {
         }));
 
         if (action === "CANCEL") {
-            const current = await ddb.send(new GetCommand({ TableName: TABLES.LIKES, Key: { fromUserId: fromEmail, toUserId } }));
-            const currentAction = String(current.Item?.action || "").toUpperCase();
-            if (currentAction === "REJECTED") {
-                const reverse = await ddb.send(new GetCommand({ TableName: TABLES.LIKES, Key: { fromUserId: toUserId, toUserId: fromEmail } }));
-                if (String(reverse.Item?.action || "").toUpperCase() === "REJECTED_BY_RECEIVER") {
-                    const restored = reverse.Item?.previousAction || "LIKE";
-                    await ddb.send(new PutCommand({ TableName: TABLES.LIKES, Item: { fromUserId: toUserId, toUserId: fromEmail, action: restored, timestamp: Date.now() } }));
-                }
-            }
-            await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email: fromEmail }, UpdateExpression: "REMOVE interactions.#target", ExpressionAttributeNames: { "#target": toUserId } }));
-            await ddb.send(new DeleteCommand({ TableName: TABLES.LIKES, Key: { fromUserId: fromEmail, toUserId } }));
-            return res.json({ success: true, matched: false, coins: coinUpdate.Attributes.coins });
+            try {
+                await ddb.send(new DeleteCommand({ TableName: TABLES.LIKES, Key: { fromUserId: fromEmail, toUserId } }));
+            } catch (e) {}
+            try {
+                await ddb.send(new DeleteCommand({ TableName: TABLES.LIKES, Key: { fromUserId: toUserId, toUserId: fromEmail } }));
+            } catch (e) {}
+
+            try {
+                await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email: fromEmail }, UpdateExpression: "REMOVE interactions.#target", ExpressionAttributeNames: { "#target": toUserId } }));
+            } catch (e) {}
+            try {
+                await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email: toUserId }, UpdateExpression: "REMOVE interactions.#target", ExpressionAttributeNames: { "#target": fromEmail } }));
+            } catch (e) {}
+
+            // Real-time socket notification to both parties to clear request/rejected lists
+            io.to(toUserId).emit('sync_needed');
+            io.to(fromEmail).emit('sync_needed');
+
+            return res.json({ success: true, matched: false });
         }
 
         // UNMATCH
@@ -593,7 +588,7 @@ app.post('/profile/save', authenticateToken, async (req, res) => {
             TableName: TABLES.USERS,
             Key: { email: req.user.email },
             UpdateExpression:
-                "SET #name = :name, #u = :u, age = :age, gender = :gender, country = :country, #st = :state, latitude = :lat, longitude = :lon, photoUri = :photoUri, bio = :bio, secondaryPhotos = :secondaryPhotos, dob = :dob, height = :height, religion = :religion, education = :education, profession = :profession, diet = :diet, habits = :habits, #lang = :language, intentions = :intentions, interests = :interests, introVideoUri = :introVideoUri, deviceId = :deviceId",
+                "SET #name = :name, #u = :u, age = :age, gender = :gender, country = :country, #st = :state, latitude = :lat, longitude = :lon, photoUri = :photoUri, bio = :bio, secondaryPhotos = :secondaryPhotos, dob = :dob, height = :height, religion = :religion, education = :education, profession = :profession, diet = :diet, habits = :habits, #lang = :language, intentions = :intentions, interests = :interests, introVideoUri = :introVideoUri, deviceId = :deviceId, badgeType = :badgeType, badgeExpiry = :badgeExpiry, badgeActivatedAt = :badgeActivatedAt, isAdFree = :isAdFree, isPremium = :isPremium, subscriptionExpiry = :subscriptionExpiry",
 
             ExpressionAttributeNames: {
                 "#name": "name",
@@ -625,7 +620,13 @@ app.post('/profile/save', authenticateToken, async (req, res) => {
                 ":intentions": data.intentions || "",
                 ":interests": data.interests || "",
                 ":introVideoUri": data.introVideoUri || "",
-                ":deviceId": data.deviceId || ""
+                ":deviceId": data.deviceId || "",
+                ":badgeType": data.badgeType || "NONE",
+                ":badgeExpiry": data.badgeExpiry || 0,
+                ":badgeActivatedAt": data.badgeActivatedAt || 0,
+                ":isAdFree": data.isAdFree || false,
+                ":isPremium": data.isPremium || false,
+                ":subscriptionExpiry": data.subscriptionExpiry || 0
             }
         }));
 
@@ -748,7 +749,9 @@ io.on('connection', (socket) => {
     socket.on('message:deleted', (data) => io.to(String(data.toUserId).toLowerCase()).emit('message:deleted', data));
     socket.on('unmatch_user', (data) => io.to(String(data.toUserId).toLowerCase()).emit('unmatch_user', data));
 
-    // Omegle-style Blind Date Queue
+    // Omegle-style Blind Date Queue (EnglishTrackingAI pattern)
+    let blindDatePairs = new Map();
+
     socket.on('blinddate:join', (data) => {
         const userId = String(data.fromUserId || '').toLowerCase();
         const callType = data.callType || 'audio';
@@ -758,6 +761,9 @@ io.on('connection', (socket) => {
 
         if (partnerIndex !== -1) {
             const partner = blindDateQueue.splice(partnerIndex, 1)[0];
+
+            blindDatePairs.set(socket.id, partner.socketId);
+            blindDatePairs.set(partner.socketId, socket.id);
 
             io.to(socket.id).emit('blinddate:matched', {
                 partnerId: partner.userId,
@@ -775,9 +781,24 @@ io.on('connection', (socket) => {
         }
     });
 
+    socket.on('blinddate:signal', (data) => {
+        const partnerSocketId = blindDatePairs.get(socket.id);
+        if (partnerSocketId) {
+            io.to(partnerSocketId).emit('blinddate:signal', data);
+        } else if (data.targetUserId) {
+            io.to(String(data.targetUserId).toLowerCase()).emit('blinddate:signal', data);
+        }
+    });
+
     socket.on('blinddate:leave', (data) => {
         const userId = String(data.fromUserId || '').toLowerCase();
         blindDateQueue = blindDateQueue.filter(u => u.userId !== userId && u.socketId !== socket.id);
+        const partnerSocketId = blindDatePairs.get(socket.id);
+        if (partnerSocketId) {
+            io.to(partnerSocketId).emit('blinddate:leave');
+            blindDatePairs.delete(partnerSocketId);
+        }
+        blindDatePairs.delete(socket.id);
     });
 
     socket.on('call:offer', (data) => io.to(String(data.toUserId).toLowerCase()).emit('call:incoming', data));
