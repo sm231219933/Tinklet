@@ -749,44 +749,75 @@ io.on('connection', (socket) => {
     socket.on('message:deleted', (data) => io.to(String(data.toUserId).toLowerCase()).emit('message:deleted', data));
     socket.on('unmatch_user', (data) => io.to(String(data.toUserId).toLowerCase()).emit('unmatch_user', data));
 
-    // Omegle-style Blind Date Queue (EnglishTrackingAI pattern)
-    let blindDatePairs = new Map();
+    // EnglishTrackingAI & Blind Date Matching Pool
+    let activeMatchingPool = [];
+    let activePeerPairs = new Map();
 
-    socket.on('blinddate:join', (data) => {
-        const userId = String(data.fromUserId || '').toLowerCase();
-        const callType = data.callType || 'audio';
+    socket.on('register_user', (data) => {
+        socket.userId = String(data.userId || '').toLowerCase();
+        socket.gender = String(data.gender || 'Any');
+        socket.mode = String(data.mode || 'audio');
+        socket.join(socket.userId);
+        console.log(`User registered: ${socket.userId} (${socket.gender}) mode: ${socket.mode}`);
+    });
 
-        blindDateQueue = blindDateQueue.filter(u => u.userId !== userId && u.socketId !== socket.id);
-        const partnerIndex = blindDateQueue.findIndex(u => u.callType === callType && u.userId !== userId);
+    socket.on('find_buddy', (data) => {
+        const userId = String(data.userId || data.fromUserId || socket.userId || '').toLowerCase();
+        const mode = String(data.mode || data.callType || 'audio').toLowerCase();
+        const prefGender = String(data.prefGender || 'Any');
+
+        activeMatchingPool = activeMatchingPool.filter(u => u.userId !== userId && u.socketId !== socket.id);
+
+        const partnerIndex = activeMatchingPool.findIndex(u => {
+            if (u.userId === userId) return false;
+            return true;
+        });
 
         if (partnerIndex !== -1) {
-            const partner = blindDateQueue.splice(partnerIndex, 1)[0];
+            const partner = activeMatchingPool.splice(partnerIndex, 1)[0];
 
-            blindDatePairs.set(socket.id, partner.socketId);
-            blindDatePairs.set(partner.socketId, socket.id);
+            activePeerPairs.set(socket.id, partner.socketId);
+            activePeerPairs.set(partner.socketId, socket.id);
+
+            console.log(`P2P MATCH SUCCESS: ${userId} <--> ${partner.userId}`);
+
+            io.to(socket.id).emit('matched', {
+                initiator: true,
+                partnerId: partner.userId,
+                isCaller: true
+            });
+
+            io.to(partner.socketId).emit('matched', {
+                initiator: false,
+                partnerId: userId,
+                isCaller: false
+            });
 
             io.to(socket.id).emit('blinddate:matched', {
                 partnerId: partner.userId,
                 isCaller: true,
-                callType: callType
+                callType: mode
             });
 
             io.to(partner.socketId).emit('blinddate:matched', {
                 partnerId: userId,
                 isCaller: false,
-                callType: callType
+                callType: mode
             });
+
         } else {
-            blindDateQueue.push({ userId, socketId: socket.id, callType });
+            activeMatchingPool.push({ userId, gender: socket.gender, mode, socketId: socket.id });
+            console.log(`User ${userId} waiting in pool (${mode}). Total waiting: ${activeMatchingPool.length}`);
         }
     });
 
-    socket.on('blinddate:signal', (data) => {
-        const partnerSocketId = blindDatePairs.get(socket.id);
+    socket.on('webrtc_signal', (data) => {
+        const partnerSocketId = activePeerPairs.get(socket.id);
         if (partnerSocketId) {
+            io.to(partnerSocketId).emit('webrtc_signal', data);
             io.to(partnerSocketId).emit('blinddate:signal', data);
         } else if (data.targetUserId) {
-            io.to(String(data.targetUserId).toLowerCase()).emit('blinddate:signal', data);
+            io.to(String(data.targetUserId).toLowerCase()).emit('webrtc_signal', data);
         }
     });
 
