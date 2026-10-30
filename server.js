@@ -1,752 +1,394 @@
-
-
-require('dotenv').config({ path: __dirname + '/.env' });
 const express = require('express');
+const cors = require('cors');
 const http = require('http');
-const { Server } = require("socket.io");
-const { DynamoDBClient } = require("@aws-sdk/client-dynamodb");
-const { DynamoDBDocumentClient, PutCommand, GetCommand, ScanCommand, QueryCommand, DeleteCommand, UpdateCommand } = require("@aws-sdk/lib-dynamodb");
-const cors = require("cors");
-const bodyParser = require("body-parser");
-const jwt = require('jsonwebtoken');
-const crypto = require("crypto");
-const { v4: uuidv4 } = require('uuid');
-const axios = require('axios');
-const qs = require('qs');
-const { default: makeWASocket, useMultiFileAuthState } = require("@whiskeysockets/baileys");
-const pino = require('pino');
+const { Server } = require('socket.io');
 
 const app = express();
 app.use(cors());
-app.use(bodyParser.json({ limit: '50mb' }));
-app.use(bodyParser.urlencoded({ limit: '50mb', extended: true }));
+app.use(express.json());
+
 const masterServer = http.createServer(app);
-const io = new Server(masterServer, { cors: { origin: "*" } });
-const client = new DynamoDBClient({ region: "ap-south-1", credentials: { accessKeyId: process.env.AWS_ACCESS_KEY_ID, secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY } });
-const ddb = DynamoDBDocumentClient.from(client);
-const JWT_SECRET = process.env.JWT_SECRET || 'tinklet_secret_2026';
-const IMGBB_KEY = process.env.IMGBB_KEY;
-const TABLES = { USERS: "Profiles", LIKES: "Likes", MATCHES: "Matches", REPORTS: "Reports", DELETION: "DeletionRequests" };
-
-function authenticateToken(req, res, next) {
-    const authHeader = req.headers['authorization'];
-    const token = authHeader && authHeader.split(' ')[1];
-    if (!token) return res.status(401).json({ error: "Fail" });
-    jwt.verify(token, JWT_SECRET, (err, user) => {
-        if (err) return res.status(403).json({ error: "Fail" });
-        req.user = { email: (user.email || user).trim().toLowerCase() };
-        next();
-    });
-}
-function createMatchId(u1, u2) { return crypto.createHash("sha256").update([u1.toLowerCase(), u2.toLowerCase()].sort().join(":")).digest("hex").substring(0, 32); }
-
-async function setInteractionStatus(email, targetEmail, status) {
-    const user = await ddb.send(new GetCommand({
-        TableName: TABLES.USERS,
-        Key: { email }
-    }));
-    const interactions = user.Item?.interactions;
-
-    if (interactions && typeof interactions === "object") {
-        await ddb.send(new UpdateCommand({
-            TableName: TABLES.USERS,
-            Key: { email },
-            UpdateExpression: "SET interactions.#target = :status",
-            ExpressionAttributeNames: { "#target": targetEmail },
-            ExpressionAttributeValues: { ":status": status }
-        }));
-    } else {
-        await ddb.send(new UpdateCommand({
-            TableName: TABLES.USERS,
-            Key: { email },
-            UpdateExpression: "SET interactions = :interactions",
-            ExpressionAttributeValues: {
-                ":interactions": { [targetEmail]: status }
-            }
-        }));
-    }
-}
-
-// --- MISSING ENDPOINTS REQUIRED FOR LOGIN / REGISTRATION ---
-app.get('/profile/get/public', async (req, res) => {
-    try {
-        const result = await ddb.send(new GetCommand({ TableName: TABLES.USERS, Key: { email: req.query.email.trim().toLowerCase() } }));
-        res.json(result.Item || null);
-    } catch (e) { res.status(500).json({ error: e.message }); }
+const io = new Server(masterServer, {
+    cors: { origin: '*', methods: ['GET', 'POST'] },
+    transports: ['websocket', 'polling'],
+    pingTimeout: 60000,
+    pingInterval: 25000
 });
 
-app.get('/profile/get', authenticateToken, async (req, res) => {
-    try {
-        const result = await ddb.send(new GetCommand({ TableName: TABLES.USERS, Key: { email: req.query.email.trim().toLowerCase() } }));
-        res.json(result.Item || null);
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
+// App Settings & Config
+let onlineUsers = new Map();
+let activeCalls = new Map();
+let userActivity = new Map();
+let liveUsersCount = 0;
+
+// Storage structures for Tinklet Messaging
+let userSessions = new Map();
+let activeConnections = new Map();
+
+// Global EnglishTrackingAI variables
+const BANNED_USERS_FILE = 'banned_users.json';
+let bannedUsers = new Set();
+let onlinePool = new Map();
+let callerQueue = [];
+let audioMatchingPool = new Map();
+let chatMatchingPool = new Map();
+
+// Dating Specific
+let activeDatingCalls = new Map();
+let recentChatHistory = [];
+let activeP2PCalls = new Map();
+
+// EnglishTrackingAI Calling Specific
+let activeMatches = new Map();
+let currentCallPairs = new Map();
+let blindDateQueue = [];
+let blindDatePairs = new Map();
 
-app.get('/phone/check', async (req, res) => {
-    try {
-        const phone = req.query.phone || "";
-        const result = await ddb.send(new ScanCommand({
-            TableName: TABLES.USERS,
-            FilterExpression: "phoneNumber = :p",
-            ExpressionAttributeValues: { ":p": phone }
-        }));
-        res.json({ exists: result.Count > 0 });
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-// ==========================================
-// MEDIA & IMAGE UPLOADS
-// ==========================================
-app.post('/media/upload', async (req, res) => {
-    try {
-        const { mediaType } = req.body;
-        const dummyUrl = mediaType === "video"
-            ? "https://www.w3schools.com/html/mov_bbb.mp4"
-            : "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3";
-        res.json({ url: dummyUrl });
-    } catch (e) { res.status(500).json({ error: "Upload fail" }); }
-});
-
-app.post('/image/upload', async (req, res) => {
-    try {
-        const data = require('qs').stringify({ image: req.body.base64Image.split(',')[1] || req.body.base64Image });
-        const resp = await require('axios').post(`https://api.imgbb.com/1/upload?key=${IMGBB_KEY}`, data);
-        res.json({ url: resp.data.data.url });
-    } catch (e) { res.status(500).json({ error: "Upload fail" }); }
-});
-
-app.post('/api/auth/signup', async (req, res) => {
-    try {
-        const email = req.body.email.trim().toLowerCase();
-        const newUser = { ...req.body, email, userId: uuidv4(), coins: 25, coinInitializedV2: true, interactions: {}, createdAt: new Date().toISOString() };
-        await ddb.send(new PutCommand({ TableName: TABLES.USERS, Item: newUser }));
-        res.json({ token: jwt.sign({ email }, JWT_SECRET), user: newUser });
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-app.post('/api/auth/login', async (req, res) => {
-    try {
-        const email = req.body.email.trim().toLowerCase();
-        const result = await ddb.send(new GetCommand({ TableName: TABLES.USERS, Key: { email } }));
-        if (!result.Item || req.body.password.trim() !== result.Item.password) return res.status(401).json({ error: "Fail" });
-        if (result.Item.isDeactivated || result.Item.deletionRequestedAt) {
-            await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email }, UpdateExpression: "SET isDeactivated = :f REMOVE deletionRequestedAt", ExpressionAttributeValues: { ":f": false } }));
-            try { await ddb.send(new DeleteCommand({ TableName: TABLES.DELETION, Key: { email } })); } catch(err) {}
-        }
-        if (result.Item.coinInitializedV2 !== true) {
-            await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email }, UpdateExpression: "SET coins = :coins, coinInitializedV2 = :v", ExpressionAttributeValues: { ":coins": 25, ":v": true } }));
-            result.Item.coins = 25; result.Item.coinInitializedV2 = true;
-        } else if (result.Item.coins === undefined || result.Item.coins === null || Number.isNaN(Number(result.Item.coins))) {
-            await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email }, UpdateExpression: "SET coins = :coins", ExpressionAttributeValues: { ":coins": 25 } }));
-            result.Item.coins = 25;
-        }
-        res.json({ token: jwt.sign({ email: result.Item.email }, JWT_SECRET), user: result.Item });
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-app.get('/api/sync/all', authenticateToken, async (req, res) => {
-    try {
-        const email = req.user.email;
-        const allUsers = await ddb.send(new ScanCommand({ TableName: TABLES.USERS }));
-        const profileMap = {};
-        (allUsers.Items || []).forEach(u => { if (u.email) profileMap[u.email.toLowerCase()] = { ...u, photoUri: u.photoUri || u.photoUrl || "" }; });
-      //01
-        const sentResult = await ddb.send(new QueryCommand({
-    TableName: TABLES.LIKES,
-    KeyConditionExpression: "fromUserId = :me",
-    ExpressionAttributeValues: { ":me": email }
-}));
-
-// Sent me sirf meri taraf se bheje gaye pending LIKE/SUPERLIKE dikhen.
-// ACCEPTED/REJECTED ko Sent request nahi maana jayega.
-const sent = (sentResult.Items || []).filter(l => {
-    const action = String(l.action || "").trim().toUpperCase();
-
-    return (
-        ["LIKE", "SUPERLIKE"].includes(action) &&
-        String(l.fromUserId || "").trim().toLowerCase() === email
-    );
-});
-
-// 01
-
-        let incomingItems = [];
-        try {
-            const incomingGsi = await ddb.send(new QueryCommand({ TableName: TABLES.LIKES, IndexName: "toUserId-index", KeyConditionExpression: "toUserId = :me", ExpressionAttributeValues: { ":me": email } }));
-            incomingItems = incomingGsi.Items || [];
-        } catch (e) { console.error("[SYNC] Incoming GSI query failed:", e.message); }
-       // 01
-        const allLikes = await ddb.send(new ScanCommand({ TableName: TABLES.LIKES }));
-const myProfileRes = await ddb.send(new GetCommand({ TableName: TABLES.USERS, Key: { email } }));
-const myInteractions = myProfileRes.Item?.interactions || {};
-
-const scannedIncoming = (allLikes.Items || []).filter(l => String(l.toUserId || "").trim().toLowerCase() === email);
-const incomingMap = new Map();
-[...incomingItems, ...scannedIncoming].forEach(l => incomingMap.set(`${String(l.fromUserId || "").toLowerCase()}::${String(l.toUserId || "").toLowerCase()}`, l));
-
-// Sirf wahi incoming requests filter karo jo abhi tak ACCEPT ya REJECT nahi hui hain ----- 01
-const incomingLikes = [...incomingMap.values()].filter(l => {
-    const actionUpper = String(l.action || "").trim().toUpperCase();
-    const fromEmail = String(l.fromUserId || "").trim().toLowerCase();
-    const toEmail = String(l.toUserId || "").trim().toLowerCase();
-    const myInteractionWithPartner = String(myInteractions[fromEmail] || "").trim().toUpperCase();
-
-    return fromEmail !== email &&
-           toEmail === email &&
-           actionUpper === "LIKE" &&
-           myInteractionWithPartner !== "ACCEPTED" &&
-           myInteractionWithPartner !== "REJECTED";
-});
-
-const incomingSuperlikes = [...incomingMap.values()].filter(l => {
-    const actionUpper = String(l.action || "").trim().toUpperCase();
-    const fromEmail = String(l.fromUserId || "").trim().toLowerCase();
-    const toEmail = String(l.toUserId || "").trim().toLowerCase();
-    const myInteractionWithPartner = String(myInteractions[fromEmail] || "").trim().toUpperCase();
-
-    return fromEmail !== email &&
-           toEmail === email &&
-           actionUpper === "SUPERLIKE" &&
-           myInteractionWithPartner !== "ACCEPTED" &&
-           myInteractionWithPartner !== "REJECTED";
-});
-        const incomingRejected = [...incomingMap.values()].filter(l => {
-    const actionUpper = String(l.action || "").trim().toUpperCase();
-    const fromEmail = String(l.fromUserId || "").trim().toLowerCase();
-    const toEmail = String(l.toUserId || "").trim().toLowerCase();
-
-    return (
-        fromEmail !== email &&
-        toEmail === email &&
-        actionUpper === "REJECTED"
-    );
-});
-      //  01
-
-        const matches = await ddb.send(new ScanCommand({ TableName: TABLES.MATCHES, FilterExpression: "contains(#u, :me)", ExpressionAttributeNames: { "#u": "users" }, ExpressionAttributeValues: { ":me": email } }));
-        res.json({
-    user: profileMap[email],
-
-    sent: sent.map(l => ({
-    fromUserId: l.fromUserId,
-    toUserId: l.toUserId,
-    action: l.action,
-    timestamp: l.timestamp || 0,
-    profile: profileMap[String(l.toUserId || "").trim().toLowerCase()] || null
-})),
-
-   incomingLikes: incomingLikes.map(l => ({
-    fromUserId: l.fromUserId,
-    toUserId: l.toUserId,
-    action: l.action,
-    timestamp: l.timestamp || 0,
-    profile: profileMap[String(l.fromUserId || "").trim().toLowerCase()] || null
-})),
-
-incomingSuperlikes: incomingSuperlikes.map(l => ({
-    fromUserId: l.fromUserId,
-    toUserId: l.toUserId,
-    action: l.action,
-    timestamp: l.timestamp || 0,
-    profile: profileMap[String(l.fromUserId || "").trim().toLowerCase()] || null
-})),
-
-incomingRejected: incomingRejected.map(l => ({
-    fromUserId: l.fromUserId,
-    toUserId: l.toUserId,
-    action: l.action,
-    timestamp: l.timestamp || 0,
-    profile: profileMap[String(l.fromUserId || "").trim().toLowerCase()] || null
-})),
-//01
-        // Naya code purane data (...m) ke saath details extra add kar raha hai
-    matches: (matches.Items || []).map(m => {
-        const partnerEmail = (m.users || []).find(u => String(u).toLowerCase() !== email.toLowerCase());
-        return {
-            ...m, // Isse purana matchId, users, aur timestamp bilkul safe rahega
-            partnerProfile: profileMap[String(partnerEmail || "").toLowerCase()] || null // Extra details add ho gayi
-            //01
-        };
-    })
-});
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-app.get('/api/swipe/feed', authenticateToken, async (req, res) => {
-    try {
-        const myEmail = req.user.email;
-        const [allUsers, meRes] = await Promise.all([ddb.send(new ScanCommand({ TableName: TABLES.USERS })), ddb.send(new GetCommand({ TableName: TABLES.USERS, Key: { email: myEmail } }))]);
-        const me = meRes.Item || {};
-        const swiped = Object.keys(me.interactions || {}).map(e => e.toLowerCase().trim());
-        const feed = (allUsers.Items || []).filter(u => {
-            if (!u.email) return false;
-            const target = u.email.toLowerCase().trim();
-            return target !== myEmail && !swiped.includes(target) && u.isDeactivated !== true;
-        }).map(u => ({ ...u, photoUri: u.photoUri || u.photoUrl || "" }));
-        res.json({ feed });
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-app.post('/api/swipe/action', authenticateToken, async (req, res) => {
-    const action = String(req.body.action || "").trim().toUpperCase();
-    try {
-        const fromEmail = req.user.email.trim().toLowerCase();
-        const toUserId = String(req.body.toUserId || "").trim().toLowerCase();
-        if (!toUserId || toUserId === fromEmail) return res.status(400).json({ error: "Invalid target" });
-
-        // ACCEPT never costs coins. It accepts only a real incoming LIKE/SUPERLIKE.
-        if (action === "ACCEPT") {
-            const incoming = await ddb.send(new GetCommand({
-                TableName: TABLES.LIKES,
-                Key: { fromUserId: toUserId, toUserId: fromEmail }
-            }));
-            const incomingAction = String(incoming.Item?.action || "").toUpperCase();
-
-            if (!["LIKE", "SUPERLIKE"].includes(incomingAction)) {
-                return res.status(400).json({ error: "Request not found" });
-            }
-
-            const matchId = createMatchId(fromEmail, toUserId);
-            const now = Date.now();
-
-            await ddb.send(new PutCommand({
-                TableName: TABLES.MATCHES,
-                Item: { matchId, users: [fromEmail, toUserId], timestamp: now }
-            }));
-
-            await setInteractionStatus(fromEmail, toUserId, "ACCEPTED");
-            await setInteractionStatus(toUserId, fromEmail, "ACCEPTED");
-
-            await ddb.send(new PutCommand({
-                TableName: TABLES.LIKES,
-                Item: {
-                    fromUserId: toUserId,
-                    toUserId: fromEmail,
-                    action: "ACCEPTED",
-                    previousAction: incomingAction,
-                    timestamp: now
-                }
-            }));
-
-            await ddb.send(new PutCommand({
-                TableName: TABLES.LIKES,
-                Item: {
-                    fromUserId: fromEmail,
-                    toUserId,
-                    action: "ACCEPTED",
-                    previousAction: incomingAction,
-                    timestamp: now
-                }
-            }));
-
-            const meAfterAccept = await ddb.send(new GetCommand({
-                TableName: TABLES.USERS,
-                Key: { email: fromEmail }
-            }));
-
-            return res.json({
-                success: true,
-                matched: true,
-                matchId,
-                coins: Number(meAfterAccept.Item?.coins || 0)
-            });
-        }
-//01
-        // LIKE / SUPERLIKE: if the other user already liked us, create a match immediately.
-       // LIKE / SUPERLIKE: if the other user already liked us, create a match immediately.
-if (action === "LIKE" || action === "SUPERLIKE") {
-    const reverse = await ddb.send(new GetCommand({
-        TableName: TABLES.LIKES,
-        Key: { fromUserId: toUserId, toUserId: fromEmail }
-    }));
-    const reverseAction = String(reverse.Item?.action || "").toUpperCase();
-
-    if (["LIKE", "SUPERLIKE"].includes(reverseAction)) {
-        const matchId = createMatchId(fromEmail, toUserId);
-        const now = Date.now();
-
-        // 1. Matches Table me entry create karo
-        await ddb.send(new PutCommand({
-            TableName: TABLES.MATCHES,
-            Item: { matchId, users: [fromEmail, toUserId], timestamp: now }
-        }));
-
-        // 2. Dono users ki profile ke interactions ko strictly MATCHED/ACCEPTED karo
-        await setInteractionStatus(fromEmail, toUserId, "ACCEPTED");
-        await setInteractionStatus(toUserId, fromEmail, "ACCEPTED");
-
-        // 3. Likes Table me dono side ki entry ACCEPTED karo
-        await ddb.send(new PutCommand({
-            TableName: TABLES.LIKES,
-            Item: { fromUserId: fromEmail, toUserId, action: "ACCEPTED", timestamp: now, previousAction: action }
-        }));
-
-        await ddb.send(new PutCommand({
-            TableName: TABLES.LIKES,
-            Item: { fromUserId: toUserId, toUserId: fromEmail, action: "ACCEPTED", timestamp: now, previousAction: reverseAction }
-        }));
-
-        const meAfterMatch = await ddb.send(new GetCommand({ TableName: TABLES.USERS, Key: { email: fromEmail } }));
-        return res.json({
-            success: true,
-            matched: true,
-            matchId,
-            coins: Number(meAfterMatch.Item?.coins || 0)
-        });
-    }
-}
-      //  01
-
-        // Swiping, Liking, Superliking cost NO coins (FREE for all)
-        const cost = 0;
-
-        const currentUser = await ddb.send(new GetCommand({
-            TableName: TABLES.USERS,
-            Key: { email: fromEmail }
-        }));
-        let coinUpdate = { Attributes: { ...(currentUser.Item || {}), coins: Number(currentUser.Item?.coins || 0) } };
-
-        await ddb.send(new UpdateCommand({
-            TableName: TABLES.USERS,
-            Key: { email: fromEmail },
-            UpdateExpression: "SET interactions = if_not_exists(interactions, :empty)",
-            ExpressionAttributeValues: { ":empty": {} }
-        }));
-
-        if (action === "CANCEL") {
-            try {
-                await ddb.send(new DeleteCommand({ TableName: TABLES.LIKES, Key: { fromUserId: fromEmail, toUserId } }));
-            } catch (e) {}
-            try {
-                await ddb.send(new DeleteCommand({ TableName: TABLES.LIKES, Key: { fromUserId: toUserId, toUserId: fromEmail } }));
-            } catch (e) {}
-
-            try {
-                await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email: fromEmail }, UpdateExpression: "REMOVE interactions.#target", ExpressionAttributeNames: { "#target": toUserId } }));
-            } catch (e) {}
-            try {
-                await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email: toUserId }, UpdateExpression: "REMOVE interactions.#target", ExpressionAttributeNames: { "#target": fromEmail } }));
-            } catch (e) {}
-
-            // Real-time socket notification to both parties to clear request/rejected lists
-            io.to(toUserId).emit('sync_needed');
-            io.to(fromEmail).emit('sync_needed');
-
-            return res.json({ success: true, matched: false });
-        }
-
-        // UNMATCH
-        if (action === "UNMATCH") {
-            try {
-                await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email: fromEmail }, UpdateExpression: "REMOVE interactions.#target", ExpressionAttributeNames: { "#target": toUserId } }));
-                await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email: toUserId }, UpdateExpression: "REMOVE interactions.#target", ExpressionAttributeNames: { "#target": fromEmail } }));
-            } catch(e) {}
-            try { await ddb.send(new DeleteCommand({ TableName: TABLES.LIKES, Key: { fromUserId: fromEmail, toUserId } })); } catch(e){}
-            try { await ddb.send(new DeleteCommand({ TableName: TABLES.LIKES, Key: { fromUserId: toUserId, toUserId: fromEmail } })); } catch(e){}
-
-            const matchId1 = createMatchId(fromEmail, toUserId);
-            try { await ddb.send(new DeleteCommand({ TableName: TABLES.MATCHES, Key: { matchId: matchId1 } })); } catch(e){}
-            return res.json({ success: true, matched: false });
-        }
-
-       if (action === "REJECTED") {
-    // Sirf humare interactions me targets ko REJECTED mark karo
-    await setInteractionStatus(fromEmail, toUserId, "REJECTED");
-
-    // Likes table me entry dalo ki maine isko reject kiya hai
-    await ddb.send(new PutCommand({
-        TableName: TABLES.LIKES,
-        Item: { fromUserId: fromEmail, toUserId: toUserId, action: "REJECTED", timestamp: Date.now() }
-    }));
-
-    return res.json({ success: true, matched: false, coins: coinUpdate.Attributes.coins });
-} // 01
-
-        await setInteractionStatus(fromEmail, toUserId, action);
-        await ddb.send(new PutCommand({ TableName: TABLES.LIKES, Item: { fromUserId: fromEmail, toUserId, action, timestamp: Date.now() } }));
-        return res.json({ success: true, matched: false, coins: coinUpdate.Attributes.coins });
-    } catch (e) {
-        console.error("[SWIPE FAIL]:", e.message);
-        if (e.name === "ConditionalCheckFailedException") return res.status(400).json({ error: "Insufficient coins" });
-        res.status(500).json({ error: "Server technical error" });
-    }
-});
-
-// --- NEW FEATURES APIS ---
-app.post('/api/coins/deduct', authenticateToken, async (req, res) => {
-    try {
-        const { amount, reason } = req.body;
-        if (!amount || amount <= 0) return res.status(400).json({ error: "Invalid amount" });
-
-        const myEmail = req.user.email;
-        const coinUpdate = await ddb.send(new UpdateCommand({
-            TableName: TABLES.USERS,
-            Key: { email: myEmail },
-            UpdateExpression: "SET coins = if_not_exists(coins, :start) - :cost",
-            ConditionExpression: "attribute_not_exists(coins) OR coins >= :cost",
-            ExpressionAttributeValues: { ":start": 25, ":cost": amount },
-            ReturnValues: "ALL_NEW"
-        }));
-        res.json({ success: true, coins: Number(coinUpdate.Attributes.coins) });
-    } catch (e) {
-        if (e.name === "ConditionalCheckFailedException") {
-            return res.status(400).json({ error: "Insufficient coins" });
-        }
-        res.status(500).json({ error: e.message });
-    }
-});
-
-app.post('/api/chat/edit', authenticateToken, async (req, res) => {
-    try {
-        const { messageId, newText } = req.body;
-        if (!messageId || !newText) return res.status(400).json({ error: "Missing fields" });
-
-        const scanRes = await ddb.send(new ScanCommand({
-            TableName: "Messages",
-            FilterExpression: "messageId = :mid",
-            ExpressionAttributeValues: { ":mid": messageId }
-        }));
-
-        if (scanRes.Items && scanRes.Items.length > 0) {
-            for (const item of scanRes.Items) {
-                const key = { matchId: item.matchId };
-                if (item.timestamp !== undefined) key.timestamp = item.timestamp;
-
-                await ddb.send(new UpdateCommand({
-                    TableName: "Messages",
-                    Key: key,
-                    UpdateExpression: "SET #t = :nt, isEdited = :e",
-                    ExpressionAttributeNames: { "#t": "text" },
-                    ExpressionAttributeValues: { ":nt": newText, ":e": true }
-                }));
-            }
-        }
-        res.json({ success: true });
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-app.post('/api/chat/delete', authenticateToken, async (req, res) => {
-    try {
-        const { messageId } = req.body;
-        if (!messageId) return res.status(400).json({ error: "Missing messageId" });
-
-        const scanRes = await ddb.send(new ScanCommand({
-            TableName: "Messages",
-            FilterExpression: "messageId = :mid",
-            ExpressionAttributeValues: { ":mid": messageId }
-        }));
-
-        if (scanRes.Items && scanRes.Items.length > 0) {
-            for (const item of scanRes.Items) {
-                const key = { matchId: item.matchId };
-                if (item.timestamp !== undefined) key.timestamp = item.timestamp;
-
-                try {
-                    await ddb.send(new DeleteCommand({ TableName: "Messages", Key: key }));
-                } catch (err) {
-                    try {
-                        await ddb.send(new DeleteCommand({ TableName: "Messages", Key: { matchId: item.matchId, messageId: item.messageId } }));
-                    } catch (err2) {}
-                }
-            }
-        }
-        res.json({ success: true });
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-app.post('/api/coins/reward', authenticateToken, async (req, res) => {
-    try { const update = await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email: req.user.email }, UpdateExpression: "SET coins = if_not_exists(coins, :start) + :r", ExpressionAttributeValues: { ":r": 5, ":start": 25 }, ReturnValues: "ALL_NEW" })); res.json({ success: true, coins: Number(update.Attributes.coins) }); }
-    catch (e) { res.status(500).json({ error: e.message }); }
-});
-app.post('/api/referral/credit', authenticateToken, async (req, res) => {
-    try { const { code } = req.body; const all = await ddb.send(new ScanCommand({ TableName: TABLES.USERS })); const referrer = all.Items.find(u => u.referralCode === code); if (referrer) { await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email: referrer.email }, UpdateExpression: "SET coins = if_not_exists(coins, :start) + :b", ExpressionAttributeValues: { ":b": 50, ":start": 25 } })); res.json({ success: true }); } else { res.status(404).json({ error: "Invalid code" }); } }
-    catch (e) { res.status(500).json({ error: e.message }); }
-});
-app.get('/api/swipe/leaderboard', async (req, res) => {
-    try { const result = await ddb.send(new ScanCommand({ TableName: TABLES.USERS, ProjectionExpression: "email, username, coins" })); res.json({ leaderboard: (result.Items || []).sort((a,b) => (b.coins || 0) - (a.coins || 0)) }); }
-    catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-app.post('/api/account/deactivate', authenticateToken, async (req, res) => {
-    try { await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email: req.user.email }, UpdateExpression: "SET isDeactivated = :t", ExpressionAttributeValues: { ":t": true } })); res.json({ success: true }); }
-    catch (e) { res.status(500).json({ error: e.message }); }
-});
-app.post('/api/account/delete-request', authenticateToken, async (req, res) => {
-    try { await ddb.send(new PutCommand({ TableName: TABLES.DELETION, Item: { email: req.user.email, requestedAt: Date.now(), status: "PENDING" } })); await ddb.send(new UpdateCommand({ TableName: TABLES.USERS, Key: { email: req.user.email }, UpdateExpression: "SET deletionRequestedAt = :t", ExpressionAttributeValues: { ":t": Date.now() } })); res.json({ success: true }); }
-    catch (e) { res.status(500).json({ error: e.message }); }
-});
-app.post('/api/report', authenticateToken, async (req, res) => {
-    try { await ddb.send(new PutCommand({ TableName: TABLES.REPORTS, Item: { reportId: uuidv4(), reporter: req.user.email, target: req.body.targetEmail, reason: req.body.reason, timestamp: Date.now() } })); res.json({ success: true }); }
-    catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-app.post('/profile/save', authenticateToken, async (req, res) => {
-    try {
-        const data = { ...req.body, email: req.user.email };
-
-        await ddb.send(new UpdateCommand({
-            TableName: TABLES.USERS,
-            Key: { email: req.user.email },
-            UpdateExpression:
-                "SET #name = :name, #u = :u, age = :age, gender = :gender, country = :country, #st = :state, latitude = :lat, longitude = :lon, photoUri = :photoUri, bio = :bio, secondaryPhotos = :secondaryPhotos, dob = :dob, height = :height, religion = :religion, education = :education, profession = :profession, diet = :diet, habits = :habits, #lang = :language, intentions = :intentions, interests = :interests, introVideoUri = :introVideoUri, deviceId = :deviceId, badgeType = :badgeType, badgeExpiry = :badgeExpiry, badgeActivatedAt = :badgeActivatedAt, isAdFree = :isAdFree, isPremium = :isPremium, subscriptionExpiry = :subscriptionExpiry",
-
-            ExpressionAttributeNames: {
-                "#name": "name",
-                "#u": "username",
-                "#st": "state",
-                "#lang": "language"
-            },
-
-            ExpressionAttributeValues: {
-                ":name": data.name || "",
-                ":u": data.username || "",
-                ":age": data.age || 0,
-                ":gender": data.gender || "",
-                ":country": data.country || "",
-                ":state": data.state || "",
-                ":lat": data.latitude || 0.0,
-                ":lon": data.longitude || 0.0,
-                ":photoUri": data.photoUri || "",
-                ":bio": data.bio || "",
-                ":secondaryPhotos": data.secondaryPhotos || [],
-                ":dob": data.dob || "",
-                ":height": data.height || "",
-                ":religion": data.religion || "",
-                ":education": data.education || "",
-                ":profession": data.profession || "",
-                ":diet": data.diet || "",
-                ":habits": data.habits || "",
-                ":language": data.language || "",
-                ":intentions": data.intentions || "",
-                ":interests": data.interests || "",
-                ":introVideoUri": data.introVideoUri || "",
-                ":deviceId": data.deviceId || "",
-                ":badgeType": data.badgeType || "NONE",
-                ":badgeExpiry": data.badgeExpiry || 0,
-                ":badgeActivatedAt": data.badgeActivatedAt || 0,
-                ":isAdFree": data.isAdFree || false,
-                ":isPremium": data.isPremium || false,
-                ":subscriptionExpiry": data.subscriptionExpiry || 0
-            }
-        }));
-
-        res.json({ success: true });
-    }
-    catch (e) {
-        console.error("Profile Save Error:", e.name, e.message);
-        res.status(500).json({ error: e.message });
-    }
-});
-
-app.get('/profile/me', authenticateToken, async (req, res) => {
-    try { const result = await ddb.send(new GetCommand({ TableName: TABLES.USERS, Key: { email: req.user.email } })); res.json({ user: result.Item }); }
-    catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-app.get('/profile/:email', authenticateToken, async (req, res) => {
-    try { const result = await ddb.send(new GetCommand({ TableName: TABLES.USERS, Key: { email: req.params.email.trim().toLowerCase() } })); res.json({ user: result.Item }); }
-    catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-app.get('/api/matches', authenticateToken, async (req, res) => {
-    try { const result = await ddb.send(new ScanCommand({ TableName: TABLES.MATCHES, FilterExpression: "contains(#u, :me)", ExpressionAttributeNames: { "#u": "users" }, ExpressionAttributeValues: { ":me": req.user.email } })); res.json({ matches: result.Items || [] }); }
-    catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-app.get('/api/chat/:matchId', authenticateToken, async (req, res) => {
-    try { const result = await ddb.send(new QueryCommand({ TableName: "Messages", KeyConditionExpression: "matchId = :m", ExpressionAttributeValues: { ":m": req.params.matchId } })); res.json({ messages: result.Items || [] }); }
-    catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-app.post('/api/chat/send', authenticateToken, async (req, res) => {
-    try {
-        const targetEmail = String(req.body.matchId || "").trim().toLowerCase();
-        const text = String(req.body.text || "");
-
-        if (!targetEmail || !text.trim()) {
-            return res.status(400).json({ error: "Invalid chat message" });
-        }
-
-        const myEmail = req.user.email.trim().toLowerCase();
-        const users = [myEmail, targetEmail].sort();
-        const matchId = `${users[0]}_${users[1]}`;
-
-        const item = {
-            matchId,
-            messageId: req.body.messageId || uuidv4(),
-            sender: myEmail,
-            text,
-            imageUrl: req.body.imageUrl || "",
-            timestamp: String(Date.now())
-        };
-
-        await ddb.send(new PutCommand({
-            TableName: "Messages",
-            Item: item
-        }));
-
-        res.json({
-            success: true,
-            message: item
-        });
-
-    } catch (e) {
-        console.error("[CHAT SAVE FAIL]:", e);
-        res.status(500).json({ error: e.message });
-    }
-});
-
-app.get('/api/notifications', authenticateToken, async (req, res) => {
-    try { const result = await ddb.send(new QueryCommand({ TableName: "Notifications", KeyConditionExpression: "userEmail = :e", ExpressionAttributeValues: { ":e": req.user.email } })); res.json({ notifications: result.Items || [] }); }
-    catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-app.post('/api/notifications/read', authenticateToken, async (req, res) => {
-    try { await ddb.send(new UpdateCommand({ TableName: "Notifications", Key: { userEmail: req.user.email, notificationId: req.body.notificationId }, UpdateExpression: "SET #r = :t", ExpressionAttributeNames: { "#r": "read" }, ExpressionAttributeValues: { ":t": true } })); res.json({ success: true }); }
-    catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-app.post('/api/account/logout', authenticateToken, async (req, res) => {
-    res.json({ success: true });
-});
-
-app.get('/health', (req, res) => res.json({ ok: true }));
 
 io.on('connection', (socket) => {
+    liveUsersCount++;
+    io.emit('live_count_update', { count: liveUsersCount });
+
+    // 1. Tinklet / BharatDatingApp Chat Signaling
+    socket.on('authenticate', (data) => {
+        if (!data || !data.userId) return;
+        const uId = String(data.userId).toLowerCase();
+        userSessions.set(uId, socket.id);
+        activeConnections.set(socket.id, uId);
+        socket.join(uId);
+    });
+
+    socket.on('send_message', (data) => {
+        if (!data || !data.targetUserId) return;
+        const targetId = String(data.targetUserId).toLowerCase();
+
+        io.to(targetId).emit('receive_message', {
+            id: data.id,
+            text: data.text,
+            senderId: data.senderId,
+            targetUserId: targetId,
+            timestamp: data.timestamp,
+            isMe: false,
+            replyToId: data.replyToId,
+            replyToText: data.replyToText
+        });
+
+        io.to(String(data.senderId).toLowerCase()).emit('message_delivered', {
+            id: data.id,
+            targetUserId: targetId
+        });
+    });
+
+    socket.on('mark_read', (data) => {
+        if (!data || !data.senderId) return;
+        io.to(String(data.senderId).toLowerCase()).emit('message_read', {
+            id: data.id,
+            readBy: data.readerId
+        });
+    });
+
+    socket.on('delete_message', (data) => {
+        if (!data || !data.targetUserId) return;
+        const targetId = String(data.targetUserId).toLowerCase();
+        io.to(targetId).emit('message_deleted', {
+            id: data.id,
+            deleterId: data.deleterId
+        });
+    });
+
+    socket.on('edit_message', (data) => {
+        if (!data || !data.targetUserId) return;
+        const targetId = String(data.targetUserId).toLowerCase();
+        io.to(targetId).emit('message_edited', {
+            id: data.id,
+            newText: data.newText,
+            editorId: data.editorId
+        });
+    });
+
+    socket.on('block_user', (data) => {
+        if (!data || !data.targetUserId) return;
+        const targetId = String(data.targetUserId).toLowerCase();
+        io.to(targetId).emit('user_blocked', {
+            blockedBy: data.blockerId
+        });
+    });
+
+    // 2. Original App Audio/Video Call System
     socket.on('register', (userId) => {
-        const room = String(userId || '').toLowerCase();
-        socket.join(room);
-        console.log(`User registered in room: ${room}`);
+        const uId = String(userId).toLowerCase();
+        onlineUsers.set(uId, socket.id);
+        socket.userId = uId;
+        userActivity.set(uId, Date.now());
+
+        const count = onlineUsers.size;
+        console.log(`[Dating] User registered: ${uId}, Online: ${count}`);
+
+        socket.join(uId);
+        io.emit('online_users_update', { count });
+
+        const usersList = Array.from(onlineUsers.keys()).map(id => ({ userId: id }));
+        io.emit('user_list', usersList);
     });
 
-    socket.on('join', (email) => {
-        const room = String(email || '').toLowerCase();
-        socket.join(room);
-        console.log(`User joined room: ${room}`);
+    socket.on('keep_alive', (userId) => {
+        if(userId) userActivity.set(String(userId).toLowerCase(), Date.now());
     });
 
-    socket.on('chat:message', async (data) => {
-        try {
-            const toUserId = String(data.toUserId || '').toLowerCase();
-            const fromUserId = String(data.fromUserId || '').toLowerCase();
-            const text = data.text || data.sdp || '';
-            const messageId = data.messageId || uuidv4();
-            const timestamp = data.timestamp || Date.now();
+    socket.on('call:offer', (data) => {
+        const toId = String(data.toUserId).toLowerCase();
+        const fromId = String(data.fromUserId).toLowerCase();
 
-            // Relay message to recipient in real-time
-            io.to(toUserId).emit('chat:message', {
-                fromUserId: fromUserId,
-                text: text,
-                messageId: messageId,
-                timestamp: Number(timestamp)
+        activeDatingCalls.set(fromId, toId);
+        activeDatingCalls.set(toId, fromId);
+
+        io.to(toId).emit('call:incoming', data);
+    });
+
+    socket.on('call:answer', (data) => {
+        const toId = String(data.toUserId).toLowerCase();
+        io.to(toId).emit('call:answered', data);
+    });
+
+    socket.on('call:reject', (data) => {
+        const toId = String(data.toUserId).toLowerCase();
+        activeDatingCalls.delete(toId);
+        activeDatingCalls.delete(String(data.fromUserId).toLowerCase());
+        io.to(toId).emit('call:rejected', data);
+    });
+
+    socket.on('call:ice-candidate', (data) => {
+        const toId = String(data.toUserId).toLowerCase();
+        io.to(toId).emit('call:ice-candidate', data);
+    });
+
+    socket.on('call:end', (data) => {
+        const toId = String(data.toUserId).toLowerCase();
+        activeDatingCalls.delete(toId);
+        if (data.fromUserId) activeDatingCalls.delete(String(data.fromUserId).toLowerCase());
+        io.to(toId).emit('call:ended', data);
+    });
+
+
+    // 3. Structured Calling Handlers (SignalingClient.kt ke liye)
+    socket.on('user:join', (data) => {
+        socket.join(String(data.userId).toLowerCase());
+    });
+
+    socket.on('call:start', (data) => {
+        io.to(String(data.toUserId).toLowerCase()).emit('call:incoming', data);
+    });
+
+    socket.on('call:cancel', (data) => {
+        io.to(String(data.toUserId).toLowerCase()).emit('call:cancelled', data);
+    });
+
+    // --- BLIND DATE MATCHING (Tinklet Specific) ---
+    socket.on('blinddate:join', (data) => {
+        const userId = String(data.fromUserId).toLowerCase();
+        const callType = data.callType || 'audio';
+
+        blindDateQueue = blindDateQueue.filter(u => u.userId !== userId && u.socketId !== socket.id);
+
+        const partnerIndex = blindDateQueue.findIndex(u => u.callType === callType && u.userId !== userId);
+
+        if (partnerIndex !== -1) {
+            const partner = blindDateQueue.splice(partnerIndex, 1)[0];
+
+            blindDatePairs.set(socket.id, partner.socketId);
+            blindDatePairs.set(partner.socketId, socket.id);
+
+            io.to(socket.id).emit('blinddate:matched', {
+                partnerId: partner.userId,
+                isCaller: true,
+                callType: callType
             });
-        } catch (e) { console.error('Socket chat error:', e.message); }
+
+            io.to(partner.socketId).emit('blinddate:matched', {
+                partnerId: userId,
+                isCaller: false,
+                callType: callType
+            });
+        } else {
+            blindDateQueue.push({
+                userId,
+                socketId: socket.id,
+                callType
+            });
+        }
     });
 
-    socket.on('message:delivered', (data) => io.to(String(data.toUserId).toLowerCase()).emit('message:delivered', data));
-    socket.on('message:read', (data) => io.to(String(data.toUserId).toLowerCase()).emit('message:read', data));
-    socket.on('message:edited', (data) => io.to(String(data.toUserId).toLowerCase()).emit('message:edited', data));
-    socket.on('message:deleted', (data) => io.to(String(data.toUserId).toLowerCase()).emit('message:deleted', data));
+    socket.on('blinddate:signal', (data) => {
+        const partnerSocketId = blindDatePairs.get(socket.id);
+        if (partnerSocketId) {
+            io.to(partnerSocketId).emit('blinddate:signal', data);
+        } else if (data.targetUserId) {
+            io.to(String(data.targetUserId).toLowerCase()).emit('blinddate:signal', data);
+        }
+    });
+
+
+    // EnglishTrackingAI Features
+    socket.on('join_pool', (data) => {
+        if(bannedUsers.has(socket.id)) return;
+        const userName = data.userName || 'Learner';
+        const targetType = data.type || 'audio_match';
+
+        onlinePool.set(socket.id, { id: socket.id, name: userName, type: targetType, isBusy: false });
+
+        if(targetType === 'speaking_partner') {
+            const availableHost = Array.from(onlinePool.values()).find(u => u.type === 'speaking_host' && !u.isBusy);
+            if(availableHost) {
+                onlinePool.get(socket.id).isBusy = true;
+                onlinePool.get(availableHost.id).isBusy = true;
+
+                io.to(socket.id).emit('match_found', { hostId: availableHost.id, hostName: availableHost.name });
+                io.to(availableHost.id).emit('learner_joined', { learnerId: socket.id, learnerName: userName });
+            }
+        }
+    });
+
+    socket.on('leave_pool', () => onlinePool.delete(socket.id));
+    socket.on('webrtc_offer', (data) => io.to(data.targetId).emit('webrtc_offer', { sdp: data.sdp, senderId: socket.id }));
+    socket.on('webrtc_answer', (data) => io.to(data.targetId).emit('webrtc_answer', { sdp: data.sdp, senderId: socket.id }));
+    socket.on('ice_candidate', (data) => io.to(data.targetId).emit('ice_candidate', { candidate: data.candidate, senderId: socket.id }));
+
+    socket.on('send_chat', (data) => {
+        const msg = { senderName: data.senderName, text: data.text };
+        recentChatHistory.push(msg);
+        if (recentChatHistory.length > 50) recentChatHistory.shift();
+        io.to(data.targetId).emit('receive_chat', msg);
+    });
+
+    socket.on('end_call', (data) => {
+        if(onlinePool.has(socket.id)) onlinePool.get(socket.id).isBusy = false;
+        if(data.targetId) {
+            if(onlinePool.has(data.targetId)) onlinePool.get(data.targetId).isBusy = false;
+            io.to(data.targetId).emit('call_ended', { senderId: socket.id });
+        }
+    });
+
+    // EnglishTrackingAI Calling Features
+    socket.on('register_caller', (data) => {
+        socket.userId = data.userId;
+        socket.userName = data.userName;
+        activeMatches.set(socket.id, { userId: data.userId, name: data.userName, mode: 'idle' });
+    });
+
+    socket.on('join_random_call', () => {
+        if(!socket.userId) return;
+        const availablePartner = callerQueue.find(p => p.socketId !== socket.id);
+        if(availablePartner) {
+            callerQueue = callerQueue.filter(p => p.socketId !== availablePartner.socketId);
+            currentCallPairs.set(socket.id, availablePartner.socketId);
+            currentCallPairs.set(availablePartner.socketId, socket.id);
+
+            io.to(socket.id).emit('call_matched', { partnerId: availablePartner.userId, partnerName: availablePartner.userName, isInitiator: true });
+            io.to(availablePartner.socketId).emit('call_matched', { partnerId: socket.userId, partnerName: socket.userName, isInitiator: false });
+        } else {
+            callerQueue.push({ socketId: socket.id, userId: socket.userId, userName: socket.userName });
+        }
+    });
+
+    socket.on('leave_random_call', () => {
+        callerQueue = callerQueue.filter(p => p.socketId !== socket.id);
+    });
+
+    socket.on('direct_call_offer', (data) => {
+        const targetSocket = Array.from(activeMatches.entries()).find(([sid, user]) => user.userId === data.targetUserId);
+        if(targetSocket) {
+            io.to(targetSocket[0]).emit('incoming_direct_call', { callerId: socket.userId, callerName: socket.userName, sdp: data.sdp });
+        }
+    });
+
+    socket.on('relay_sdp', (data) => {
+        const targetSid = currentCallPairs.get(socket.id) || Array.from(activeMatches.entries()).find(([sid, user]) => user.userId === data.targetId)?.[0];
+        if(targetSid) io.to(targetSid).emit('receive_sdp', { sdp: data.sdp });
+    });
+
+    socket.on('relay_ice', (data) => {
+        const targetSid = currentCallPairs.get(socket.id) || Array.from(activeMatches.entries()).find(([sid, user]) => user.userId === data.targetId)?.[0];
+        if(targetSid) io.to(targetSid).emit('receive_ice', { candidate: data.candidate });
+    });
+
+
+    // EnglishTrackingAI Audio Match
+    socket.on('join_audio_match', (data) => {
+        const uInfo = { id: socket.id, gender: data.gender, pref: data.prefGender };
+
+        const partner = Array.from(audioMatchingPool.values()).find(p =>
+            p.id !== socket.id &&
+            (uInfo.pref === 'Any' || uInfo.pref === p.gender) &&
+            (p.pref === 'Any' || p.pref === uInfo.gender)
+        );
+
+        if(partner) {
+            audioMatchingPool.delete(partner.id);
+            activeP2PCalls.set(socket.id, partner.id);
+            activeP2PCalls.set(partner.id, socket.id);
+
+            io.to(socket.id).emit('audio_matched', { initiator: true });
+            io.to(partner.id).emit('audio_matched', { initiator: false });
+        } else {
+            audioMatchingPool.set(socket.id, uInfo);
+        }
+    });
+
+    socket.on('leave_audio_match', () => audioMatchingPool.delete(socket.id));
+
+    socket.on('webrtc_signal', (data) => {
+        const target = activeP2PCalls.get(socket.id);
+        if(target) io.to(target).emit('webrtc_signal', data);
+    });
+
+    // EnglishTrackingAI Chat Match
+    socket.on('join_chat_match', (data) => {
+        const uInfo = { id: socket.id, gender: data.gender, pref: data.prefGender };
+
+        const partner = Array.from(chatMatchingPool.values()).find(p =>
+            p.id !== socket.id &&
+            (uInfo.pref === 'Any' || uInfo.pref === p.gender) &&
+            (p.pref === 'Any' || p.pref === uInfo.gender)
+        );
+
+        if(partner) {
+            chatMatchingPool.delete(partner.id);
+            activeP2PCalls.set(socket.id, partner.id);
+            activeP2PCalls.set(partner.id, socket.id);
+
+            io.to(socket.id).emit('chat_matched', { partnerId: partner.id });
+            io.to(partner.id).emit('chat_matched', { partnerId: socket.id });
+        } else {
+            chatMatchingPool.set(socket.id, uInfo);
+        }
+    });
+
+    socket.on('leave_chat_match', () => chatMatchingPool.delete(socket.id));
+
+    socket.on('chat_message', (data) => {
+        const target = activeP2PCalls.get(socket.id);
+        if(target) io.to(target).emit('chat_message', data);
+    });
+
+    socket.on('typing_status', (data) => {
+        const target = activeP2PCalls.get(socket.id);
+        if(target) io.to(target).emit('typing_status', data);
+    });
+
+    socket.on('chat_left', () => {
+        const target = activeP2PCalls.get(socket.id);
+        if(target) {
+            io.to(target).emit('chat_left');
+            activeP2PCalls.delete(target);
+        }
+        activeP2PCalls.delete(socket.id);
+    });
+
+    socket.on('like_profile', (data) => io.to(String(data.toUserId).toLowerCase()).emit('new_like', data));
+    socket.on('match_created', (data) => {
+        io.to(String(data.user1).toLowerCase()).emit('match_created', data);
+        io.to(String(data.user2).toLowerCase()).emit('match_created', data);
+    });
     socket.on('unmatch_user', (data) => io.to(String(data.toUserId).toLowerCase()).emit('unmatch_user', data));
 
     // EnglishTrackingAI & Blind Date Matching Pool
@@ -822,14 +464,18 @@ io.on('connection', (socket) => {
     });
 
     socket.on('blinddate:leave', (data) => {
-        const userId = String(data.fromUserId || '').toLowerCase();
-        blindDateQueue = blindDateQueue.filter(u => u.userId !== userId && u.socketId !== socket.id);
-        const partnerSocketId = blindDatePairs.get(socket.id);
+        const userId = String(data.fromUserId || socket.userId || '').toLowerCase();
+        // Fixed: Use activeMatchingPool instead of old blindDateQueue
+        activeMatchingPool = activeMatchingPool.filter(u => u.userId !== userId && u.socketId !== socket.id);
+
+        // Fixed: Use activePeerPairs instead of old blindDatePairs
+        const partnerSocketId = activePeerPairs.get(socket.id);
         if (partnerSocketId) {
             io.to(partnerSocketId).emit('blinddate:leave');
-            blindDatePairs.delete(partnerSocketId);
+            io.to(partnerSocketId).emit('buddy_left');
+            activePeerPairs.delete(partnerSocketId);
         }
-        blindDatePairs.delete(socket.id);
+        activePeerPairs.delete(socket.id);
     });
 
     socket.on('call:offer', (data) => io.to(String(data.toUserId).toLowerCase()).emit('call:incoming', data));
@@ -837,6 +483,45 @@ io.on('connection', (socket) => {
     socket.on('call:reject', (data) => io.to(String(data.toUserId).toLowerCase()).emit('call:rejected', data));
     socket.on('call:ice-candidate', (data) => io.to(String(data.toUserId).toLowerCase()).emit('call:ice-candidate', data));
     socket.on('call:end', (data) => io.to(String(data.toUserId).toLowerCase()).emit('call:ended', data));
+
+    socket.on('disconnect', () => {
+        liveUsersCount = Math.max(0, liveUsersCount - 1);
+        io.emit('live_count_update', { count: liveUsersCount });
+
+        const uId = activeConnections.get(socket.id);
+        if (uId) {
+            userSessions.delete(uId);
+            activeConnections.delete(socket.id);
+        }
+
+        if (socket.userId) {
+            onlineUsers.delete(socket.userId);
+            const count = onlineUsers.size;
+            io.emit('online_users_update', { count });
+        }
+
+        onlinePool.delete(socket.id);
+        callerQueue = callerQueue.filter(p => p.socketId !== socket.id);
+        audioMatchingPool.delete(socket.id);
+        chatMatchingPool.delete(socket.id);
+
+        const peerPartner = activeP2PCalls.get(socket.id);
+        if(peerPartner) {
+            io.to(peerPartner).emit('buddy_left');
+            activeP2PCalls.delete(peerPartner);
+            activeP2PCalls.delete(socket.id);
+        }
+
+        // Cleanup Tinklet / BharatDatingApp active pools on disconnect
+        activeMatchingPool = activeMatchingPool.filter(u => u.socketId !== socket.id);
+        const matchPartnerId = activePeerPairs.get(socket.id);
+        if (matchPartnerId) {
+            io.to(matchPartnerId).emit('buddy_left');
+            io.to(matchPartnerId).emit('blinddate:leave');
+            activePeerPairs.delete(matchPartnerId);
+        }
+        activePeerPairs.delete(socket.id);
+    });
 });
 
 const PORT = process.env.PORT || 4000;
