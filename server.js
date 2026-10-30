@@ -820,14 +820,19 @@ io.on('connection', (socket) => {
     });
 
     socket.on('blinddate:leave', (data) => {
-        const userId = String(data.fromUserId || '').toLowerCase();
-        blindDateQueue = blindDateQueue.filter(u => u.userId !== userId && u.socketId !== socket.id);
-        const partnerSocketId = blindDatePairs.get(socket.id);
+        const userId = String(data.fromUserId || socket.userId || '').toLowerCase();
+
+        // 1. Remove from the active matching pool so they don't ghost
+        activeMatchingPool = activeMatchingPool.filter(u => u.userId !== userId && u.socketId !== socket.id);
+
+        // 2. Alert the partner if they were in an active P2P pair
+        const partnerSocketId = activePeerPairs.get(socket.id);
         if (partnerSocketId) {
             io.to(partnerSocketId).emit('blinddate:leave');
-            blindDatePairs.delete(partnerSocketId);
+            io.to(partnerSocketId).emit('buddy_left');
+            activePeerPairs.delete(partnerSocketId);
         }
-        blindDatePairs.delete(socket.id);
+        activePeerPairs.delete(socket.id);
     });
 
     socket.on('call:offer', (data) => io.to(String(data.toUserId).toLowerCase()).emit('call:incoming', data));
@@ -835,6 +840,17 @@ io.on('connection', (socket) => {
     socket.on('call:reject', (data) => io.to(String(data.toUserId).toLowerCase()).emit('call:rejected', data));
     socket.on('call:ice-candidate', (data) => io.to(String(data.toUserId).toLowerCase()).emit('call:ice-candidate', data));
     socket.on('call:end', (data) => io.to(String(data.toUserId).toLowerCase()).emit('call:ended', data));
+
+    // Add disconnect listener to prevent ghost users when internet drops
+    socket.on('disconnect', () => {
+        activeMatchingPool = activeMatchingPool.filter(u => u.socketId !== socket.id);
+        const partnerSocketId = activePeerPairs.get(socket.id);
+        if (partnerSocketId) {
+            io.to(partnerSocketId).emit('buddy_left');
+            activePeerPairs.delete(partnerSocketId);
+        }
+        activePeerPairs.delete(socket.id);
+    });
 });
 
 const PORT = process.env.PORT || 4000;
