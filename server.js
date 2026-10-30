@@ -760,57 +760,52 @@ io.on('connection', (socket) => {
     });
 
     socket.on('find_buddy', (data) => {
-        const userId = String(data.userId || data.fromUserId || socket.userId || '').toLowerCase();
-        const gender = String(data.gender || socket.gender || 'Any');
-        const mode = String(data.mode || data.callType || 'audio').toLowerCase();
-        const prefGender = String(data.prefGender || 'Any');
+        try {
+            const userId = String((data && (data.userId || data.fromUserId)) || socket.userId || '').toLowerCase();
+            const gender = String((data && data.gender) || socket.gender || 'Any');
+            const mode = String((data && (data.mode || data.callType)) || 'audio').toLowerCase();
+            const prefGender = String((data && data.prefGender) || 'Any');
 
-        activeMatchingPool = activeMatchingPool.filter(u => u.userId !== userId && u.socketId !== socket.id);
+            activeMatchingPool = activeMatchingPool.filter(u => u.userId !== userId && u.socketId !== socket.id);
 
-        const partnerIndex = activeMatchingPool.findIndex(u => {
-            if (u.userId === userId) return false;
-            if (u.mode !== mode) return false;
-            if (prefGender && prefGender !== 'Any' && prefGender !== 'All' && u.gender && u.gender !== 'Any' && u.gender !== prefGender) return false;
-            if (u.prefGender && u.prefGender !== 'Any' && u.prefGender !== 'All' && gender && gender !== 'Any' && u.prefGender !== gender) return false;
-            return true;
-        });
-
-        if (partnerIndex !== -1) {
-            const partner = activeMatchingPool.splice(partnerIndex, 1)[0];
-
-            activePeerPairs.set(socket.id, partner.socketId);
-            activePeerPairs.set(partner.socketId, socket.id);
-
-            console.log(`P2P MATCH SUCCESS: ${userId} <--> ${partner.userId}`);
-
-            // Emit to both socket ID AND User Email Room for Cloudflare Proxy compatibility
-            io.to(socket.id).to(userId).emit('matched', {
-                initiator: true,
-                partnerId: partner.userId,
-                isCaller: true
+            const partnerIndex = activeMatchingPool.findIndex(u => {
+                if (u.userId === userId) return false;
+                if (u.mode !== mode) return false;
+                if (prefGender && prefGender !== 'Any' && prefGender !== 'All' && u.gender && u.gender !== 'Any' && u.gender !== prefGender) return false;
+                if (u.prefGender && u.prefGender !== 'Any' && u.prefGender !== 'All' && gender && gender !== 'Any' && u.prefGender !== gender) return false;
+                return true;
             });
 
-            io.to(partner.socketId).to(partner.userId).emit('matched', {
-                initiator: false,
-                partnerId: userId,
-                isCaller: false
-            });
+            if (partnerIndex !== -1) {
+                const partner = activeMatchingPool.splice(partnerIndex, 1)[0];
 
-            io.to(socket.id).to(userId).emit('blinddate:matched', {
-                partnerId: partner.userId,
-                isCaller: true,
-                callType: mode
-            });
+                activePeerPairs.set(socket.id, partner.socketId);
+                activePeerPairs.set(partner.socketId, socket.id);
 
-            io.to(partner.socketId).to(partner.userId).emit('blinddate:matched', {
-                partnerId: userId,
-                isCaller: false,
-                callType: mode
-            });
+                console.log(`P2P MATCH SUCCESS: ${userId} <--> ${partner.userId}`);
 
-        } else {
-            activeMatchingPool.push({ userId, gender, mode, prefGender, socketId: socket.id });
-            console.log(`User ${userId} waiting in pool (${mode}, gender=${gender}). Total waiting: ${activeMatchingPool.length}`);
+                const matchCallerPayload = { initiator: true, partnerId: partner.userId, isCaller: true };
+                const matchCalleePayload = { initiator: false, partnerId: userId, isCaller: false };
+
+                io.to(socket.id).emit('matched', matchCallerPayload);
+                io.to(partner.socketId).emit('matched', matchCalleePayload);
+                if (userId) io.to(userId).emit('matched', matchCallerPayload);
+                if (partner.userId) io.to(partner.userId).emit('matched', matchCalleePayload);
+
+                const blindCallerPayload = { partnerId: partner.userId, isCaller: true, callType: mode };
+                const blindCalleePayload = { partnerId: userId, isCaller: false, callType: mode };
+
+                io.to(socket.id).emit('blinddate:matched', blindCallerPayload);
+                io.to(partner.socketId).emit('blinddate:matched', blindCalleePayload);
+                if (userId) io.to(userId).emit('blinddate:matched', blindCallerPayload);
+                if (partner.userId) io.to(partner.userId).emit('blinddate:matched', blindCalleePayload);
+
+            } else {
+                activeMatchingPool.push({ userId, gender, mode, prefGender, socketId: socket.id });
+                console.log(`User ${userId} waiting in pool (${mode}, gender=${gender}). Total waiting: ${activeMatchingPool.length}`);
+            }
+        } catch (e) {
+            console.error("Error in find_buddy:", e.message);
         }
     });
 
