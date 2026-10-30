@@ -768,6 +768,59 @@ io.on('connection', (socket) => {
 
         const partnerIndex = activeMatchingPool.findIndex(u => {
             if (u.userId === userId) return false;
+            if (prefGender !== 'Any' && prefGender !== 'All' && u.gender && u.gender !== 'Any' && u.gender !== prefGender) return false;
+            return true;
+        });
+
+        if (partnerIndex !== -1) {
+            const partner = activeMatchingPool.splice(partnerIndex, 1)[0];
+
+            activePeerPairs.set(socket.id, partner.socketId);
+            activePeerPairs.set(partner.socketId, socket.id);
+
+            console.log(`P2P MATCH SUCCESS: ${userId} <--> ${partner.userId}`);
+
+            io.to(socket.id).emit('matched', {
+                initiator: true,
+                partnerId: partner.userId,
+                isCaller: true
+            });
+
+            io.to(partner.socketId).emit('matched', {
+                initiator: false,
+                partnerId: userId,
+                isCaller: false
+            });
+
+            io.to(socket.id).emit('blinddate:matched', {
+                partnerId: partner.userId,
+                isCaller: true,
+                callType: mode
+            });
+
+            io.to(partner.socketId).emit('blinddate:matched', {
+                partnerId: userId,
+                isCaller: false,
+                callType: mode
+            });
+
+        } else {
+            activeMatchingPool.push({ userId, gender: socket.gender, mode, socketId: socket.id });
+            console.log(`User ${userId} waiting in pool (${mode}). Total waiting: ${activeMatchingPool.length}`);
+        }
+    });
+
+    socket.on('blinddate:join', (data) => {
+        // Alias blinddate:join to find_buddy so legacy callers route to the exact same queue
+        const userId = String(data.fromUserId || data.userId || socket.userId || '').toLowerCase();
+        const mode = String(data.callType || data.mode || 'audio').toLowerCase();
+        const prefGender = String(data.prefGender || 'Any');
+
+        activeMatchingPool = activeMatchingPool.filter(u => u.userId !== userId && u.socketId !== socket.id);
+
+        const partnerIndex = activeMatchingPool.findIndex(u => {
+            if (u.userId === userId) return false;
+            if (prefGender !== 'Any' && prefGender !== 'All' && u.gender && u.gender !== 'Any' && u.gender !== prefGender) return false;
             return true;
         });
 
