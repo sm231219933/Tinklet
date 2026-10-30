@@ -801,25 +801,26 @@ io.on('connection', (socket) => {
 
             console.log(`P2P MATCH SUCCESS: ${userId} <--> ${partner.userId}`);
 
-            io.to(socket.id).emit('matched', {
+            // Emit to both socket ID and User Room (Email) for Cloudflare Proxy / Room compatibility
+            io.to(socket.id).to(userId).emit('matched', {
                 initiator: true,
                 partnerId: partner.userId,
                 isCaller: true
             });
 
-            io.to(partner.socketId).emit('matched', {
+            io.to(partner.socketId).to(partner.userId).emit('matched', {
                 initiator: false,
                 partnerId: userId,
                 isCaller: false
             });
 
-            io.to(socket.id).emit('blinddate:matched', {
+            io.to(socket.id).to(userId).emit('blinddate:matched', {
                 partnerId: partner.userId,
                 isCaller: true,
                 callType: mode
             });
 
-            io.to(partner.socketId).emit('blinddate:matched', {
+            io.to(partner.socketId).to(partner.userId).emit('blinddate:matched', {
                 partnerId: userId,
                 isCaller: false,
                 callType: mode
