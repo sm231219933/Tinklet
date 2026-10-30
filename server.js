@@ -762,16 +762,27 @@ io.on('connection', (socket) => {
     const handleBuddySearch = (data) => {
         const userId = String(data.userId || data.fromUserId || socket.userId || '').toLowerCase();
         const gender = String(data.gender || socket.gender || 'Any');
+        const country = String(data.country || '').trim();
+        const state = String(data.state || '').trim();
         const mode = String(data.mode || data.callType || 'audio').toLowerCase();
         const prefGender = String(data.prefGender || 'Any');
+        const prefCountry = String(data.prefCountry || 'All');
+        const prefState = String(data.prefState || 'All');
 
         activeMatchingPool = activeMatchingPool.filter(u => u.userId !== userId && u.socketId !== socket.id);
 
         const partnerIndex = activeMatchingPool.findIndex(u => {
             if (u.userId === userId) return false;
             if (u.mode !== mode) return false;
+            // Gender filter
             if (prefGender !== 'Any' && prefGender !== 'All' && u.gender && u.gender !== 'Any' && u.gender !== prefGender) return false;
             if (u.prefGender && u.prefGender !== 'Any' && u.prefGender !== 'All' && gender !== 'Any' && u.prefGender !== gender) return false;
+            // Country filter
+            if (prefCountry !== 'Any' && prefCountry !== 'All' && u.country && u.country !== 'Any' && u.country.toLowerCase() !== prefCountry.toLowerCase()) return false;
+            if (u.prefCountry && u.prefCountry !== 'Any' && u.prefCountry !== 'All' && country && u.prefCountry.toLowerCase() !== country.toLowerCase()) return false;
+            // State filter
+            if (prefState !== 'Any' && prefState !== 'All' && u.state && u.state !== 'Any' && u.state.toLowerCase() !== prefState.toLowerCase()) return false;
+            if (u.prefState && u.prefState !== 'Any' && u.prefState !== 'All' && state && u.prefState.toLowerCase() !== state.toLowerCase()) return false;
             return true;
         });
 
@@ -808,8 +819,8 @@ io.on('connection', (socket) => {
             });
 
         } else {
-            activeMatchingPool.push({ userId, gender, mode, prefGender, socketId: socket.id });
-            console.log(`User ${userId} waiting in pool (${mode}, gender=${gender}). Total waiting: ${activeMatchingPool.length}`);
+            activeMatchingPool.push({ userId, gender, country, state, mode, prefGender, prefCountry, prefState, socketId: socket.id });
+            console.log(`User ${userId} waiting in pool (${mode}, gender=${gender}, country=${country}, state=${state}). Total waiting: ${activeMatchingPool.length}`);
         }
     };
 
