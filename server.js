@@ -768,28 +768,10 @@ io.on('connection', (socket) => {
         activeMatchingPool = activeMatchingPool.filter(u => u.userId !== userId && u.socketId !== socket.id);
 
         const partnerIndex = activeMatchingPool.findIndex(u => {
-            console.log(`[DEBUG] Attempting match: ${userId} (mode=${mode}, prefG=${prefGender}) vs In-Pool ${u.userId} (mode=${u.mode}, gender=${u.gender}, prefG=${u.prefGender})`);
-
-            if (u.userId === userId) {
-                console.log(`[DEBUG] Failed: Same user (${userId})`);
-                return false;
-            }
-            if (u.mode !== mode) {
-                console.log(`[DEBUG] Failed: Mode mismatch ('${u.mode}' vs '${mode}')`);
-                return false;
-            }
-
-            // Gender filter
-            if (prefGender !== 'Any' && prefGender !== 'All' && u.gender && u.gender !== 'Any' && u.gender !== prefGender) {
-                console.log(`[DEBUG] Failed: In-pool user gender (${u.gender}) doesn't match my preference (${prefGender})`);
-                return false;
-            }
-            if (u.prefGender && u.prefGender !== 'Any' && u.prefGender !== 'All' && gender !== 'Any' && u.prefGender !== gender) {
-                console.log(`[DEBUG] Failed: My gender (${gender}) doesn't match in-pool user's preference (${u.prefGender})`);
-                return false;
-            }
-
-            console.log(`[DEBUG] Passed all checks! Match found with ${u.userId}`);
+            if (u.userId === userId) return false;
+            if (u.mode !== mode) return false;
+            if (prefGender && prefGender !== 'Any' && prefGender !== 'All' && u.gender && u.gender !== 'Any' && u.gender !== prefGender) return false;
+            if (u.prefGender && u.prefGender !== 'Any' && u.prefGender !== 'All' && gender && gender !== 'Any' && u.prefGender !== gender) return false;
             return true;
         });
 
@@ -801,7 +783,7 @@ io.on('connection', (socket) => {
 
             console.log(`P2P MATCH SUCCESS: ${userId} <--> ${partner.userId}`);
 
-            // Emit to both socket ID and User Room (Email) for Cloudflare Proxy / Room compatibility
+            // Emit to both socket ID AND User Email Room for Cloudflare Proxy compatibility
             io.to(socket.id).to(userId).emit('matched', {
                 initiator: true,
                 partnerId: partner.userId,
@@ -828,7 +810,7 @@ io.on('connection', (socket) => {
 
         } else {
             activeMatchingPool.push({ userId, gender, mode, prefGender, socketId: socket.id });
-            console.log(`User ${userId} waiting in pool (${mode}). Total waiting: ${activeMatchingPool.length}`);
+            console.log(`User ${userId} waiting in pool (${mode}, gender=${gender}). Total waiting: ${activeMatchingPool.length}`);
         }
     });
 
@@ -837,8 +819,11 @@ io.on('connection', (socket) => {
         if (partnerSocketId) {
             io.to(partnerSocketId).emit('webrtc_signal', data);
             io.to(partnerSocketId).emit('blinddate:signal', data);
-        } else if (data.targetUserId) {
-            io.to(String(data.targetUserId).toLowerCase()).emit('webrtc_signal', data);
+        }
+        const target = String(data.targetUserId || data.toUserId || '').toLowerCase();
+        if (target) {
+            io.to(target).emit('webrtc_signal', data);
+            io.to(target).emit('blinddate:signal', data);
         }
     });
 
