@@ -710,6 +710,10 @@ app.post('/api/account/logout', authenticateToken, async (req, res) => {
 
 app.get('/health', (req, res) => res.json({ ok: true }));
 
+// EnglishTrackingAI & Blind Date Matching Pool (Global Scope across all connections)
+let activeMatchingPool = [];
+let activePeerPairs = new Map();
+
 io.on('connection', (socket) => {
     socket.on('register', (userId) => {
         const room = String(userId || '').toLowerCase();
@@ -746,10 +750,6 @@ io.on('connection', (socket) => {
     socket.on('message:edited', (data) => io.to(String(data.toUserId).toLowerCase()).emit('message:edited', data));
     socket.on('message:deleted', (data) => io.to(String(data.toUserId).toLowerCase()).emit('message:deleted', data));
     socket.on('unmatch_user', (data) => io.to(String(data.toUserId).toLowerCase()).emit('unmatch_user', data));
-
-    // EnglishTrackingAI & Blind Date Matching Pool
-    let activeMatchingPool = [];
-    let activePeerPairs = new Map();
 
     socket.on('register_user', (data) => {
         socket.userId = String(data.userId || '').toLowerCase();
